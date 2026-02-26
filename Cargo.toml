@@ -1,0 +1,54 @@
+[package]
+name = "thelio-io2-windows"
+version = "0.1.0"
+edition = "2021"
+description = "Windows daemon for the System76 Thelio Io 2 fan control board"
+license = "GPL-2.0"
+
+[[bin]]
+name = "thelio-io2-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "thelio-io2-client"
+path = "src/client.rs"
+
+[dependencies]
+# HID support (Thelio IO 2)
+hidapi = "2.6"
+
+# Windows service framework
+windows-service = "0.7"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Serialization for IPC
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+log = "0.4"
+simple_logger = { version = "5", features = ["timestamps"] }
+
+# Synchronization
+parking_lot = "0.12"
+
+# Windows API bindings (power events, named pipes, etc.)
+# This sub-table must come last so the keys above are not absorbed into it.
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
