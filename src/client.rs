@@ -3,22 +3,23 @@
 // Usage:
 //   thelio-io2-client status
 //   thelio-io2-client set-pwm <channel> <0-255>
+//   thelio-io2-client profile
+//   thelio-io2-client set-profile <quiet|balanced|performance|manual>
 
 use std::{
     io::{BufRead, BufReader, Write},
 };
 
 // On Windows, open the named pipe as a regular file.
-// We use std::fs::OpenOptions since the pipe is byte-mode.
 use std::fs::OpenOptions;
 
 use anyhow::{bail, Context, Result};
 
-// Re-export the shared types.  In a real workspace this would be a separate
-// crate; here we just duplicate the serde-serializable types for simplicity.
 use serde::{Deserialize, Serialize};
 
 const PIPE_PATH: &str = r"\\.\pipe\thelio-io2";
+
+// ── Shared types (duplicated from daemon for single-crate build) ────────
 
 #[derive(Debug, Serialize, Deserialize)]
 enum DeviceCommand {
@@ -26,6 +27,8 @@ enum DeviceCommand {
     SetPwm { channel: usize, pwm: u8 },
     NotifySuspend,
     NotifyResume,
+    SetProfile { profile: String },
+    GetProfile,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,7 +60,13 @@ enum IpcResponse {
     State(DeviceState),
     Ok,
     Error(DeviceError),
+    ProfileInfo {
+        profile: String,
+        temp_c: Option<f64>,
+    },
 }
+
+// ── IPC communication ───────────────────────────────────────────────────
 
 fn send_command(cmd: &DeviceCommand) -> Result<IpcResponse> {
     let mut pipe = OpenOptions::new()
@@ -81,6 +90,8 @@ fn send_command(cmd: &DeviceCommand) -> Result<IpcResponse> {
 
     Ok(response)
 }
+
+// ── Command handlers ────────────────────────────────────────────────────
 
 fn cmd_status() -> Result<()> {
     match send_command(&DeviceCommand::ReadState)? {
@@ -108,7 +119,11 @@ fn cmd_status() -> Result<()> {
 fn cmd_set_pwm(channel: usize, pwm: u8) -> Result<()> {
     match send_command(&DeviceCommand::SetPwm { channel, pwm })? {
         IpcResponse::Ok => {
-            println!("PWM for channel {channel} set to {pwm} ({:.1}%)", pwm as f64 / 255.0 * 100.0);
+            println!(
+                "PWM for channel {channel} set to {pwm} ({:.1}%)",
+                pwm as f64 / 255.0 * 100.0
+            );
+            println!("Note: profile switched to manual mode.");
         }
         IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
         other => bail!("Unexpected response: {other:?}"),
@@ -116,12 +131,50 @@ fn cmd_set_pwm(channel: usize, pwm: u8) -> Result<()> {
     Ok(())
 }
 
+fn cmd_profile() -> Result<()> {
+    match send_command(&DeviceCommand::GetProfile)? {
+        IpcResponse::ProfileInfo { profile, temp_c } => {
+            println!("Active profile: {profile}");
+            if let Some(t) = temp_c {
+                println!("CPU temperature: {:.1}°C", t);
+            } else {
+                println!("CPU temperature: unavailable");
+            }
+        }
+        IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
+        other => bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+fn cmd_set_profile(name: &str) -> Result<()> {
+    match send_command(&DeviceCommand::SetProfile {
+        profile: name.to_string(),
+    })? {
+        IpcResponse::ProfileInfo { profile, temp_c } => {
+            println!("Profile set to: {profile}");
+            if let Some(t) = temp_c {
+                println!("CPU temperature: {:.1}°C", t);
+            }
+        }
+        IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
+        other => bail!("Unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+// ── Entry point ─────────────────────────────────────────────────────────
+
 fn print_usage() {
     eprintln!("System76 Io Client");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  thelio-io2-client status");
-    eprintln!("  thelio-io2-client set-pwm <channel> <0-255>");
+    eprintln!("  thelio-io2-client status                              Show fan status");
+    eprintln!("  thelio-io2-client set-pwm <channel> <0-255>           Set fan PWM (switches to manual)");
+    eprintln!("  thelio-io2-client profile                             Show current profile & temp");
+    eprintln!("  thelio-io2-client set-profile <name>                  Set profile");
+    eprintln!();
+    eprintln!("Profiles: quiet, balanced, performance, manual");
 }
 
 fn main() -> Result<()> {
@@ -139,6 +192,17 @@ fn main() -> Result<()> {
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("Expected PWM value 0–255"))?;
             cmd_set_pwm(channel, pwm)
+        }
+        Some("profile") => cmd_profile(),
+        Some("set-profile") => {
+            let name = args
+                .get(2)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Expected profile name: quiet, balanced, performance, or manual"
+                    )
+                })?;
+            cmd_set_profile(name)
         }
         _ => {
             print_usage();
