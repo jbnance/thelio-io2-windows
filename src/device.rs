@@ -33,11 +33,16 @@ pub enum DeviceCommand {
     /// Read all fan channels and return a DeviceState.
     ReadState,
     /// Set PWM for a channel (0-based index, value 0–255).
+    /// When a profile is active, this switches to Manual mode.
     SetPwm { channel: usize, pwm: u8 },
     /// Notify device about an upcoming system suspend.
     NotifySuspend,
     /// Notify device that the system has resumed.
     NotifyResume,
+    /// Set the active power profile ("quiet", "balanced", "performance", "manual").
+    SetProfile { profile: String },
+    /// Query the current power profile.
+    GetProfile,
 }
 
 /// Errors that a device operation can return, serializable for IPC.
@@ -63,6 +68,11 @@ pub enum IpcResponse {
     State(DeviceState),
     Ok,
     Error(DeviceError),
+    /// Current profile name and temperature info.
+    ProfileInfo {
+        profile: String,
+        temp_c: Option<f64>,
+    },
 }
 
 /// The core trait every device backend must implement.

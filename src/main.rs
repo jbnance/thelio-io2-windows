@@ -7,7 +7,7 @@
 //        sc start thelio-io2
 //
 //   2. As a foreground console process (development / debugging):
-//        thelio-io2-daemon.exe --console
+//        thelio-io2-daemon.exe --console [--profile <quiet|balanced|performance|manual>]
 //
 // Architecture:
 //   ┌──────────────────────────────────────────┐
@@ -19,20 +19,23 @@
 //   │  - device discovery & reconnect           │
 //   │  - handles IpcRequest from IPC server     │
 //   │  - handles PowerEvent from power module   │
+//   │  - thermal polling + fan curve control    │
 //   └────────────────┬─────────────────────────┘
 //                    │
-//         ┌──────────┴──────────┐
-//         │                     │
-//   ┌─────▼──────┐    ┌────────▼────────┐
-//   │ IPC Server │    │  Power Monitor  │
-//   │ (thread)   │    │  (callback)     │
-//   └────────────┘    └─────────────────┘
+//         ┌──────────┼──────────┐
+//         │          │          │
+//   ┌─────▼──────┐ ┌▼────────┐ ┌▼──────────────┐
+//   │ IPC Server │ │ Power   │ │ Thermal Reader │
+//   │ (thread)   │ │ Monitor │ │ (WMI)          │
+//   └────────────┘ └─────────┘ └────────────────┘
 
 #![windows_subsystem = "windows"]
 
 mod device;
+mod fan_curve;
 mod ipc;
 mod power;
+mod thermal;
 mod thelio_io;
 
 use std::{
@@ -43,7 +46,8 @@ use std::{
 };
 
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
+use parking_lot::Mutex;
 use windows_service::{
     define_windows_service,
     service::{
@@ -56,8 +60,10 @@ use windows_service::{
 
 use crate::{
     device::{Device, DeviceCommand, DeviceError, IpcResponse},
+    fan_curve::{Profile, TempHysteresis},
     ipc::IpcRequest,
     power::PowerEvent,
+    thermal::ThermalReader,
 };
 
 // ── Service name ───────────────────────────────────────────────────────────
@@ -67,32 +73,65 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 // How often to attempt device reconnection when not connected.
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
+// How often to poll temperature and adjust fan speeds.
+const THERMAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+// How often to log a periodic status summary at INFO level.
+// Individual poll results are logged at DEBUG level.
+const STATUS_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+// ── Shared state for profile (accessible from SCM handler thread) ────────
+// The SCM handler runs on a different thread, so we use a static Mutex for
+// the initial profile setting.  The actual mutable profile state lives in
+// the device loop.
+static INITIAL_PROFILE: Mutex<Profile> = Mutex::new(Profile::Balanced);
+
 // ── Entry point ───────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    // Use simple console logging.  In production a Windows Event Log sink
-    // would be preferred; this is straightforward to add later.
-    simple_logger::init_with_level(log::Level::Info)
-        .unwrap_or_default();
+    // Use simple console logging.
+    simple_logger::init_with_level(log::Level::Info).unwrap_or_default();
 
     let args: Vec<String> = env::args().collect();
+
+    // Parse --profile argument (applies to both console and service mode).
+    let profile = parse_profile_arg(&args);
+    *INITIAL_PROFILE.lock() = profile;
+    info!("Initial profile: {profile}");
+
     if args.iter().any(|a| a == "--console") {
         info!("Running in console mode (--console)");
-        return run_console();
+        return run_console(profile);
     }
 
-    // Start the Windows service dispatcher.  This call blocks until the
-    // SCM dispatches to our service_main.
+    // Start the Windows service dispatcher.
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
         .map_err(|e| anyhow::anyhow!("service_dispatcher::start failed: {e}"))?;
 
     Ok(())
 }
 
+/// Parse --profile <name> from args, defaulting to Balanced.
+fn parse_profile_arg(args: &[String]) -> Profile {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--profile" {
+            if let Some(name) = args.get(i + 1) {
+                if let Some(p) = Profile::from_str_loose(name) {
+                    return p;
+                } else {
+                    warn!("Unknown profile '{name}'; using balanced");
+                }
+            }
+        }
+    }
+    Profile::Balanced
+}
+
 // ── Console (debug) mode ───────────────────────────────────────────────────
 
-fn run_console() -> Result<()> {
+fn run_console(profile: Profile) -> Result<()> {
     info!("=== System76 Io Daemon (console mode) ===");
+    info!("Profile: {profile}");
     info!("Note: power suspend/resume events are not monitored in console mode.");
 
     let (_power_tx, power_rx) = channel::<PowerEvent>();
@@ -102,7 +141,7 @@ fn run_console() -> Result<()> {
     ipc::start(device_tx)?;
 
     // Run the device loop on the main thread.
-    device_loop(device_rx, power_rx, None);
+    device_loop(device_rx, power_rx, None, profile);
 
     Ok(())
 }
@@ -120,14 +159,15 @@ fn service_main(_args: Vec<std::ffi::OsString>) {
 fn run_service() -> Result<()> {
     info!("=== System76 Io Service starting ===");
 
+    let profile = *INITIAL_PROFILE.lock();
+    info!("Service profile: {profile}");
+
     // Channels for cross-thread communication.
     let (power_tx, power_rx) = channel::<PowerEvent>();
     let (device_tx, device_rx) = channel::<IpcRequest>();
     let (stop_tx, stop_rx) = channel::<()>();
 
     // Register our service control handler with the SCM.
-    // Power events (suspend/resume) are delivered here as ServiceControl::PowerEvent,
-    // so no separate Win32 power registration is needed.
     let status_handle = service_control_handler::register(SERVICE_NAME, {
         let stop_tx = stop_tx.clone();
         let power_tx = power_tx.clone();
@@ -174,7 +214,7 @@ fn run_service() -> Result<()> {
     ipc::start(device_tx)?;
 
     // Run the device loop.  Blocks until the service is told to stop.
-    device_loop(device_rx, power_rx, Some(stop_rx));
+    device_loop(device_rx, power_rx, Some(stop_rx), profile);
 
     // Report: Stopped
     status_handle.set_service_status(ServiceStatus {
@@ -194,17 +234,34 @@ fn run_service() -> Result<()> {
 // ── Device loop ────────────────────────────────────────────────────────────
 //
 // This is the heart of the daemon.  It owns the single `Box<dyn Device>`
-// handle and processes IPC requests and power events in a single loop,
-// with automatic reconnection on failure.
+// handle and processes IPC requests, power events, and automatic fan
+// control in a single loop.
 
 fn device_loop(
     ipc_rx: Receiver<IpcRequest>,
     power_rx: Receiver<PowerEvent>,
     stop_rx: Option<Receiver<()>>,
+    initial_profile: Profile,
 ) {
     let mut device: Option<Box<dyn Device>> = None;
-    let mut last_reconnect = Instant::now()
-        - RECONNECT_INTERVAL; // try immediately on first iteration
+    let mut last_reconnect = Instant::now() - RECONNECT_INTERVAL;
+
+    // ── Thermal / fan control state ──────────────────────────────────────
+    let mut current_profile = initial_profile;
+    let thermal_reader = thermal::try_init();
+    let mut hysteresis = TempHysteresis::new(2.0);
+    let mut last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
+    let mut last_temp_c: Option<f64> = None;
+    let mut last_pwm: Option<u8> = None;
+    let mut last_status_log = Instant::now() - STATUS_LOG_INTERVAL;
+
+    if thermal_reader.is_none() && !matches!(current_profile, Profile::Manual) {
+        warn!(
+            "No thermal reader available; switching profile to manual. \
+             Fan speeds must be set via the client."
+        );
+        current_profile = Profile::Manual;
+    }
 
     loop {
         // ── Stop signal ────────────────────────────────────────────────────
@@ -225,10 +282,10 @@ fn device_loop(
                 Some(d) => {
                     info!("Connected to: {}", d.name());
                     device = Some(d);
+                    // Immediately apply current fan profile on reconnect
+                    last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
                 }
-                None => {
-                    // No device present; we'll retry later.
-                }
+                None => {}
             }
         }
 
@@ -252,17 +309,24 @@ fn device_loop(
                             device = None;
                         }
                     }
+                    // Force an immediate thermal poll on resume
+                    last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
 
         // ── IPC requests ───────────────────────────────────────────────────
-        // Process up to ~10 requests per cycle to avoid starving other work.
         for _ in 0..10 {
             match ipc_rx.try_recv() {
                 Ok(req) => {
-                    let response = handle_request(&mut device, req.command);
+                    let response = handle_request(
+                        &mut device,
+                        req.command,
+                        &mut current_profile,
+                        last_temp_c,
+                        &thermal_reader,
+                    );
                     let _ = req.reply.send(response);
                 }
                 Err(TryRecvError::Empty) => break,
@@ -273,6 +337,88 @@ fn device_loop(
             }
         }
 
+        // ── Thermal polling + automatic fan control ────────────────────────
+        if last_temp_poll.elapsed() >= THERMAL_POLL_INTERVAL {
+            last_temp_poll = Instant::now();
+
+            if let Some(curve) = current_profile.curve() {
+                if let Some(ref reader) = thermal_reader {
+                    match reader.read_max_temp() {
+                        Ok(raw_temp) => {
+                            let eff_temp = hysteresis.update(raw_temp);
+                            last_temp_c = Some(raw_temp);
+                            let pwm = curve.duty_pwm(eff_temp);
+
+                            // Log every poll at DEBUG level.
+                            debug!(
+                                "Poll: {:.1}°C (eff {:.1}°C) → PWM {pwm} ({:.0}%) [{}]",
+                                raw_temp,
+                                eff_temp,
+                                pwm as f64 / 255.0 * 100.0,
+                                current_profile,
+                            );
+
+                            // Log at INFO when the PWM target changes.
+                            let pwm_changed = last_pwm != Some(pwm);
+                            if pwm_changed {
+                                info!(
+                                    "Fan speed change: {:.1}°C → PWM {} ({:.0}%) [{}]",
+                                    raw_temp,
+                                    pwm,
+                                    pwm as f64 / 255.0 * 100.0,
+                                    current_profile,
+                                );
+                            }
+
+                            if let Some(ref mut d) = device {
+                                let fan_count = d.fan_count();
+                                for ch in 0..fan_count {
+                                    if let Err(e) = d.write_pwm(ch, pwm) {
+                                        warn!("Failed to set PWM ch{ch}={pwm}: {e}");
+                                        if matches!(
+                                            e,
+                                            DeviceError::Comm(_) | DeviceError::Timeout
+                                        ) {
+                                            device = None;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if device.is_some() {
+                                    last_pwm = Some(pwm);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Temperature read failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Periodic status summary (INFO level, every 30 s) ──────────────
+        if last_status_log.elapsed() >= STATUS_LOG_INTERVAL {
+            last_status_log = Instant::now();
+            let dev_status = if device.is_some() { "connected" } else { "not connected" };
+            match (last_temp_c, last_pwm) {
+                (Some(t), Some(p)) => info!(
+                    "Status: device {dev_status}, profile={}, temp={:.1}°C, PWM={p} ({:.0}%)",
+                    current_profile,
+                    t,
+                    p as f64 / 255.0 * 100.0,
+                ),
+                (Some(t), None) => info!(
+                    "Status: device {dev_status}, profile={}, temp={:.1}°C, PWM=pending",
+                    current_profile, t,
+                ),
+                _ => info!(
+                    "Status: device {dev_status}, profile={}, temp=unavailable",
+                    current_profile,
+                ),
+            }
+        }
+
         // Brief sleep to avoid spinning 100% CPU.
         thread::sleep(Duration::from_millis(20));
     }
@@ -280,7 +426,13 @@ fn device_loop(
 
 // ── Request dispatch ───────────────────────────────────────────────────────
 
-fn handle_request(device: &mut Option<Box<dyn Device>>, cmd: DeviceCommand) -> IpcResponse {
+fn handle_request(
+    device: &mut Option<Box<dyn Device>>,
+    cmd: DeviceCommand,
+    current_profile: &mut Profile,
+    last_temp_c: Option<f64>,
+    thermal_reader: &Option<ThermalReader>,
+) -> IpcResponse {
     match cmd {
         DeviceCommand::ReadState => match device {
             None => IpcResponse::Error(DeviceError::NotConnected),
@@ -294,19 +446,29 @@ fn handle_request(device: &mut Option<Box<dyn Device>>, cmd: DeviceCommand) -> I
             },
         },
 
-        DeviceCommand::SetPwm { channel, pwm } => match device {
-            None => IpcResponse::Error(DeviceError::NotConnected),
-            Some(d) => match d.write_pwm(channel, pwm) {
-                Ok(()) => IpcResponse::Ok,
-                Err(e) => {
-                    warn!("write_pwm({channel}, {pwm}) failed: {e}");
-                    if matches!(e, DeviceError::Comm(_) | DeviceError::Timeout) {
-                        *device = None;
+        DeviceCommand::SetPwm { channel, pwm } => {
+            // Manual PWM override: switch to Manual profile
+            if !matches!(current_profile, Profile::Manual) {
+                info!(
+                    "Manual PWM override (ch{channel}={pwm}); switching from {} to manual",
+                    current_profile
+                );
+                *current_profile = Profile::Manual;
+            }
+            match device {
+                None => IpcResponse::Error(DeviceError::NotConnected),
+                Some(d) => match d.write_pwm(channel, pwm) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => {
+                        warn!("write_pwm({channel}, {pwm}) failed: {e}");
+                        if matches!(e, DeviceError::Comm(_) | DeviceError::Timeout) {
+                            *device = None;
+                        }
+                        IpcResponse::Error(e)
                     }
-                    IpcResponse::Error(e)
-                }
-            },
-        },
+                },
+            }
+        }
 
         DeviceCommand::NotifySuspend => {
             if let Some(ref mut d) = device {
@@ -321,6 +483,33 @@ fn handle_request(device: &mut Option<Box<dyn Device>>, cmd: DeviceCommand) -> I
             }
             IpcResponse::Ok
         }
+
+        DeviceCommand::SetProfile { profile } => {
+            match Profile::from_str_loose(&profile) {
+                Some(p) => {
+                    // Don't allow non-manual profile if we have no thermal reader
+                    if !matches!(p, Profile::Manual) && thermal_reader.is_none() {
+                        return IpcResponse::Error(DeviceError::Comm(
+                            "Cannot set automatic profile: thermal reader unavailable".into(),
+                        ));
+                    }
+                    info!("Profile changed: {} → {}", current_profile, p);
+                    *current_profile = p;
+                    IpcResponse::ProfileInfo {
+                        profile: p.to_string(),
+                        temp_c: last_temp_c,
+                    }
+                }
+                None => IpcResponse::Error(DeviceError::Comm(format!(
+                    "Unknown profile '{profile}'. Valid: quiet, balanced, performance, manual"
+                ))),
+            }
+        }
+
+        DeviceCommand::GetProfile => IpcResponse::ProfileInfo {
+            profile: current_profile.to_string(),
+            temp_c: last_temp_c,
+        },
     }
 }
 
