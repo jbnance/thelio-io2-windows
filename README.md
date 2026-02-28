@@ -2,7 +2,8 @@
 
 A Windows userspace daemon (service) written in Rust that replaces the Linux
 `system76-io-dkms` kernel driver for the **System76 Thelio Io 2**, enabling
-fan monitoring and control on System76 Thelio desktop computers running Windows.
+fan monitoring, control, and automatic temperature-based fan speed management
+on System76 Thelio desktop computers running Windows.
 
 **Supported device:** System76 Thelio Io 2 — USB HID `3384:000B`
 
@@ -11,30 +12,31 @@ fan monitoring and control on System76 Thelio desktop computers running Windows.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│              Windows Service (thelio-io2)               │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │               Device Loop (main thread)          │   │
-│  │  - Auto-detects & opens the Thelio Io 2          │   │
-│  │  - Handles IPC requests from named pipe clients  │   │
-│  │  - Handles suspend/resume power events           │   │
-│  │  - Auto-reconnects if the device is unplugged    │   │
-│  └──────────────────┬──────────────────────────────┘   │
-│                     │                                   │
-│          ┌──────────┴──────────┐                        │
-│          │                     │                        │
-│  ┌───────▼──────┐    ┌────────▼────────┐               │
-│  │  IPC Server  │    │  Power Events   │               │
-│  │ (own thread) │    │  (SCM control   │               │
-│  │ named pipe   │    │   handler)      │               │
-│  └──────────────┘    └─────────────────┘               │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                  Windows Service (thelio-io2)                    │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                 Device Loop (main thread)                  │  │
+│  │  - Auto-detects & opens the Thelio Io 2                    │  │
+│  │  - Handles IPC requests from named pipe clients            │  │
+│  │  - Handles suspend/resume power events                     │  │
+│  │  - Polls temperature & applies fan curves every 2 seconds  │  │
+│  │  - Auto-reconnects if the device is unplugged              │  │
+│  └──────────────┬────────────────────────────────────────────┘  │
+│                  │                                               │
+│       ┌──────────┼──────────────┐                                │
+│       │          │              │                                │
+│  ┌────▼─────┐ ┌──▼──────────┐ ┌▼───────────────┐               │
+│  │   IPC    │ │   Power     │ │ Thermal Reader  │               │
+│  │  Server  │ │   Events    │ │ (WMI + nvidia-  │               │
+│  │ (thread) │ │ (SCM ctrl)  │ │  smi)           │               │
+│  └──────────┘ └─────────────┘ └─────────────────┘               │
+└─────────────────────────────────────────────────────────────────┘
          ▲ named pipe: \\.\pipe\thelio-io2
          │
 ┌────────┴────────┐
 │  CLI Client     │   thelio-io2-client status
-│  or any app     │   thelio-io2-client set-pwm 0 128
+│  or any app     │   thelio-io2-client set-profile balanced
 └─────────────────┘
 ```
 
@@ -84,6 +86,18 @@ sc.exe description thelio-io2 "Controls fan speeds on modern System76 Thelio des
 sc.exe start thelio-io2
 ```
 
+The service starts with the **balanced** profile by default.  To start with a
+different profile, include `--profile` in the binary path:
+
+```powershell
+$bin = "$PWD\target\release\thelio-io2-daemon.exe --profile performance"
+
+sc.exe create thelio-io2 `
+    binPath= "$bin" `
+    DisplayName= "System76 Thelio Io2 Fan Controller" `
+    start= auto
+```
+
 ### Remove the Service
 
 ```powershell
@@ -93,21 +107,131 @@ sc.exe delete thelio-io2
 
 ---
 
+## Power Profiles
+
+The daemon supports four fan control profiles, selectable at startup or at
+runtime via the CLI client.
+
+| Profile | Behavior |
+|---|---|
+| **quiet** | Fans stay off below 50 °C, then ramp 25 % → 100 % by 90 °C. Prioritises silence. |
+| **balanced** | Fans stay off below 45 °C, then ramp 30 % → 100 % by 88 °C. Good default. |
+| **performance** | Fans stay off below 40 °C, then ramp 30 % → 100 % by 85 °C. Aggressive cooling. |
+| **manual** | No automatic fan control. PWM must be set explicitly via `set-pwm`. |
+
+### Fan curve details
+
+Each profile defines a sorted list of *(temperature, duty %)* points.  Between
+points the duty cycle is linearly interpolated.  A **2 °C hysteresis band**
+prevents rapid oscillation when the temperature hovers near a curve point.
+
+All four fan channels (CPU, Intake, GPU, Aux) are set to the same duty cycle,
+matching the Linux driver behaviour.
+
+**Balanced** (default)
+
+| Temp (°C) | Duty (%) |
+|-----------|----------|
+| < 45      | 0        |
+| 45        | 30       |
+| 55        | 35       |
+| 65        | 40       |
+| 75        | 50       |
+| 78        | 60       |
+| 81        | 70       |
+| 84        | 80       |
+| 86        | 90       |
+| ≥ 88      | 100      |
+
+**Quiet**
+
+| Temp (°C) | Duty (%) |
+|-----------|----------|
+| < 50      | 0        |
+| 50        | 25       |
+| 60        | 30       |
+| 70        | 40       |
+| 78        | 55       |
+| 82        | 70       |
+| 86        | 85       |
+| ≥ 90      | 100      |
+
+**Performance**
+
+| Temp (°C) | Duty (%) |
+|-----------|----------|
+| < 40      | 0        |
+| 40        | 30       |
+| 50        | 40       |
+| 60        | 55       |
+| 70        | 68       |
+| 75        | 78       |
+| 80        | 90       |
+| ≥ 85      | 100      |
+
+---
+
+## Temperature Sources
+
+The daemon reads temperatures from two sources and uses the **maximum**
+across both (since the chassis fans cool the entire system):
+
+| Source | Method | Notes |
+|---|---|---|
+| **CPU** | WMI `MSAcpi_ThermalZoneTemperature` (root\WMI) | Always available; returns ACPI thermal zone temps in tenths of Kelvin, converted to °C. |
+| **GPU** | `nvidia-smi --query-gpu=temperature.gpu` | Optional. Silently skipped if nvidia-smi is not installed or no NVIDIA GPU is present. |
+
+If neither source is available the daemon logs a warning and falls back to
+**manual** mode.
+
+---
+
+## Usage — Daemon
+
+### Console mode (development / debugging)
+
+```powershell
+# Run with the default balanced profile
+thelio-io2-daemon.exe --console
+
+# Run with a specific profile
+thelio-io2-daemon.exe --console --profile performance
+```
+
+### Service mode
+
+When installed as a Windows service the daemon starts automatically.  The
+`--profile` flag can be passed via the service `binPath` (see Installation).
+
+---
+
 ## Usage — CLI Client
 
 ```powershell
-# Show current fan status
+# Show current fan status (RPM, PWM, duty %)
 thelio-io2-client status
 
-# Set channel 0 (CPU fan) to 50% duty cycle (128/255)
-thelio-io2-client set-pwm 0 128
+# Show the active profile and current temperature
+thelio-io2-client profile
 
-# Full speed
-thelio-io2-client set-pwm 0 255
+# Switch to a different profile at runtime
+thelio-io2-client set-profile quiet
+thelio-io2-client set-profile balanced
+thelio-io2-client set-profile performance
+thelio-io2-client set-profile manual
+
+# Manually set a fan channel (switches to manual mode)
+thelio-io2-client set-pwm 0 128      # channel 0, 50% duty
+thelio-io2-client set-pwm 0 255      # channel 0, full speed
 ```
 
-Example output:
+> **Note:** Using `set-pwm` automatically switches the daemon to the
+> **manual** profile.  Use `set-profile` to re-enable automatic fan control.
+
+### Example output
+
 ```
+> thelio-io2-client status
 Device: System76 Thelio Io 2
 Ch    Label           RPM    PWM
 ----------------------------------------
@@ -115,6 +239,10 @@ Ch    Label           RPM    PWM
 1     Intake Fan      960      96  (37.6%)
 2     GPU Fan        1440     160  (62.7%)
 3     Aux Fan           0       0  (0.0%)
+
+> thelio-io2-client profile
+Active profile: balanced
+CPU temperature: 62.5°C
 ```
 
 ---
@@ -127,14 +255,21 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 
 ```jsonc
 // Read all fan channels
-{"ReadState": null}
+"ReadState"
 
 // Set PWM duty cycle (channel: 0-based, pwm: 0–255)
+// NOTE: switches daemon to manual profile
 {"SetPwm": {"channel": 0, "pwm": 200}}
 
+// Set the active power profile
+{"SetProfile": {"profile": "balanced"}}
+
+// Query the current profile and temperature
+"GetProfile"
+
 // Signal suspend / resume (sent automatically via Windows power events)
-{"NotifySuspend": null}
-{"NotifyResume": null}
+"NotifySuspend"
+"NotifyResume"
 ```
 
 ### Responses (daemon → client)
@@ -143,6 +278,9 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 // Fan state
 {"State": {"device_name": "System76 Thelio Io 2", "fans": [...]}}
 
+// Profile info (returned by GetProfile and SetProfile)
+{"ProfileInfo": {"profile": "balanced", "temp_c": 62.5}}
+
 // Success
 "Ok"
 
@@ -150,16 +288,6 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 {"Error": "NotConnected"}
 {"Error": {"InvalidChannel": 5}}
 {"Error": {"Comm": "HID write failed"}}
-```
-
----
-
-## Development / Debugging
-
-Run as a console process without registering a service:
-
-```powershell
-thelio-io2-daemon.exe --console
 ```
 
 ---
@@ -174,6 +302,26 @@ thelio-io2-daemon.exe --console
 | `PM_SUSPEND_PREPARE` notifier | SCM `ServiceControl::PowerEvent` in service control handler |
 | `CMD_LED_SET_MODE` on suspend | `Device::notify_suspend` / `notify_resume` |
 | DKMS module autoload | Windows service `start= auto` |
+| `system76-power` profiles | `--profile` flag + `SetProfile` / `GetProfile` IPC |
+| `system76-power` fan curves | `fan_curve.rs` with system76-power-compatible curves |
+| `/sys/class/thermal/` | WMI `MSAcpi_ThermalZoneTemperature` |
+
+---
+
+## Acknowledgments
+
+This project is adapted from and inspired by the following System76 open-source
+projects:
+
+- **[system76-io-dkms](https://github.com/pop-os/system76-io-dkms)** — Linux
+  kernel driver for the Thelio Io board.  The USB HID protocol implementation
+  (command bytes, report layout, fan channel mapping) in `thelio_io.rs` was
+  ported from this driver.
+
+- **[system76-power](https://github.com/pop-os/system76-power)** — Linux power
+  management daemon.  The fan curve data (temperature-to-duty mappings for
+  quiet, balanced, and performance profiles) in `fan_curve.rs` was ported from
+  this utility's `src/fan.rs`.
 
 ---
 
