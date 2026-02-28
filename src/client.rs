@@ -94,8 +94,24 @@ fn send_command(cmd: &DeviceCommand) -> Result<IpcResponse> {
 // ── Command handlers ────────────────────────────────────────────────────
 
 fn cmd_status() -> Result<()> {
+    // Fetch profile + temperature first.
+    match send_command(&DeviceCommand::GetProfile)? {
+        IpcResponse::ProfileInfo { profile, temp_c } => {
+            print!("Profile: {profile}");
+            if let Some(t) = temp_c {
+                println!("  |  Temperature: {:.1}°C", t);
+            } else {
+                println!("  |  Temperature: unavailable");
+            }
+        }
+        // Non-fatal — profile info is supplemental; continue to fan data.
+        _ => {}
+    }
+
+    // Fetch fan channel data.
     match send_command(&DeviceCommand::ReadState)? {
         IpcResponse::State(state) => {
+            println!();
             println!("Device: {}", state.device_name);
             println!("{:<4}  {:<14}  {:>8}  {:>5}", "Ch", "Label", "RPM", "PWM");
             println!("{}", "-".repeat(40));
