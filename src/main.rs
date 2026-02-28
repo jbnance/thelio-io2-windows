@@ -46,7 +46,7 @@ use std::{
 };
 
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use windows_service::{
     define_windows_service,
@@ -75,6 +75,10 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 // How often to poll temperature and adjust fan speeds.
 const THERMAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+// How often to log a periodic status summary at INFO level.
+// Individual poll results are logged at DEBUG level.
+const STATUS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 // ── Shared state for profile (accessible from SCM handler thread) ────────
 // The SCM handler runs on a different thread, so we use a static Mutex for
@@ -248,6 +252,8 @@ fn device_loop(
     let mut hysteresis = TempHysteresis::new(2.0);
     let mut last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
     let mut last_temp_c: Option<f64> = None;
+    let mut last_pwm: Option<u8> = None;
+    let mut last_status_log = Instant::now() - STATUS_LOG_INTERVAL;
 
     if thermal_reader.is_none() && !matches!(current_profile, Profile::Manual) {
         warn!(
@@ -343,6 +349,27 @@ fn device_loop(
                             last_temp_c = Some(raw_temp);
                             let pwm = curve.duty_pwm(eff_temp);
 
+                            // Log every poll at DEBUG level.
+                            debug!(
+                                "Poll: {:.1}°C (eff {:.1}°C) → PWM {pwm} ({:.0}%) [{}]",
+                                raw_temp,
+                                eff_temp,
+                                pwm as f64 / 255.0 * 100.0,
+                                current_profile,
+                            );
+
+                            // Log at INFO when the PWM target changes.
+                            let pwm_changed = last_pwm != Some(pwm);
+                            if pwm_changed {
+                                info!(
+                                    "Fan speed change: {:.1}°C → PWM {} ({:.0}%) [{}]",
+                                    raw_temp,
+                                    pwm,
+                                    pwm as f64 / 255.0 * 100.0,
+                                    current_profile,
+                                );
+                            }
+
                             if let Some(ref mut d) = device {
                                 let fan_count = d.fan_count();
                                 for ch in 0..fan_count {
@@ -358,13 +385,7 @@ fn device_loop(
                                     }
                                 }
                                 if device.is_some() {
-                                    info!(
-                                        "Thermal: {:.1}°C (eff {:.1}°C) → PWM {pwm} ({:.0}%) [{}]",
-                                        raw_temp,
-                                        eff_temp,
-                                        pwm as f64 / 255.0 * 100.0,
-                                        current_profile,
-                                    );
+                                    last_pwm = Some(pwm);
                                 }
                             }
                         }
@@ -373,6 +394,28 @@ fn device_loop(
                         }
                     }
                 }
+            }
+        }
+
+        // ── Periodic status summary (INFO level, every 30 s) ──────────────
+        if last_status_log.elapsed() >= STATUS_LOG_INTERVAL {
+            last_status_log = Instant::now();
+            let dev_status = if device.is_some() { "connected" } else { "not connected" };
+            match (last_temp_c, last_pwm) {
+                (Some(t), Some(p)) => info!(
+                    "Status: device {dev_status}, profile={}, temp={:.1}°C, PWM={p} ({:.0}%)",
+                    current_profile,
+                    t,
+                    p as f64 / 255.0 * 100.0,
+                ),
+                (Some(t), None) => info!(
+                    "Status: device {dev_status}, profile={}, temp={:.1}°C, PWM=pending",
+                    current_profile, t,
+                ),
+                _ => info!(
+                    "Status: device {dev_status}, profile={}, temp=unavailable",
+                    current_profile,
+                ),
             }
         }
 
