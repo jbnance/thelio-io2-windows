@@ -337,7 +337,7 @@ fn device_loop(
 
             if let Some(curve) = current_profile.curve() {
                 if let Some(ref reader) = thermal_reader {
-                    match reader.read_cpu_temp() {
+                    match reader.read_max_temp() {
                         Ok(raw_temp) => {
                             let eff_temp = hysteresis.update(raw_temp);
                             last_temp_c = Some(raw_temp);
