@@ -29,8 +29,6 @@
 //   │ (thread)   │ │ Monitor │ │ (WMI)          │
 //   └────────────┘ └─────────┘ └────────────────┘
 
-#![windows_subsystem = "windows"]
-
 mod device;
 mod fan_curve;
 mod ipc;
@@ -40,7 +38,10 @@ mod thelio_io;
 
 use std::{
     env,
-    sync::mpsc::{channel, Receiver, TryRecvError},
+    sync::{
+        mpsc::{channel, Receiver, TryRecvError},
+        OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -85,6 +86,10 @@ const STATUS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 // the initial profile setting.  The actual mutable profile state lives in
 // the device loop.
 static INITIAL_PROFILE: Mutex<Profile> = Mutex::new(Profile::Balanced);
+
+/// Stop-signal sender for console mode; used by the console control handler
+/// (which runs on a separate OS thread) to tell the device loop to exit.
+static CONSOLE_STOP_TX: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
 
 // ── Entry point ───────────────────────────────────────────────────────────
 
@@ -155,18 +160,46 @@ fn parse_profile_arg(args: &[String]) -> Profile {
 fn run_console(profile: Profile) -> Result<()> {
     info!("=== System76 Io Daemon (console mode) ===");
     info!("Profile: {profile}");
-    info!("Note: power suspend/resume events are not monitored in console mode.");
+    info!("Press Ctrl+C to stop.");
 
     let (_power_tx, power_rx) = channel::<PowerEvent>();
     let (device_tx, device_rx) = channel::<IpcRequest>();
+    let (stop_tx, stop_rx) = channel::<()>();
+
+    // Register a console control handler so Ctrl+C and console-close
+    // trigger a clean shutdown through the device loop's stop channel.
+    CONSOLE_STOP_TX.set(stop_tx).ok();
+    unsafe {
+        use windows::Win32::Foundation::BOOL;
+        use windows::Win32::System::Console::SetConsoleCtrlHandler;
+        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), BOOL(1));
+    }
 
     // Start the IPC server.
     ipc::start(device_tx)?;
 
-    // Run the device loop on the main thread.
-    device_loop(device_rx, power_rx, None, profile);
+    // Run the device loop on the main thread — blocks until stop signal.
+    device_loop(device_rx, power_rx, Some(stop_rx), profile);
 
+    info!("Console mode exiting");
     Ok(())
+}
+
+/// Called by Windows on Ctrl+C, Ctrl+Break, or console window close.
+/// Runs on a separate OS thread created by the system.
+unsafe extern "system" fn console_ctrl_handler(
+    ctrl_type: u32,
+) -> windows::Win32::Foundation::BOOL {
+    use windows::Win32::Foundation::BOOL;
+    // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2
+    if ctrl_type <= 2 {
+        if let Some(tx) = CONSOLE_STOP_TX.get() {
+            let _ = tx.send(());
+        }
+        BOOL(1) // handled — don't terminate immediately
+    } else {
+        BOOL(0) // let the system handle it
+    }
 }
 
 // ── Windows service plumbing ───────────────────────────────────────────────
