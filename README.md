@@ -173,16 +173,42 @@ matching the Linux driver behaviour.
 
 ## Temperature Sources
 
-The daemon reads temperatures from two sources and uses the **maximum**
-across both (since the chassis fans cool the entire system):
+The daemon reads CPU and GPU temperatures from multiple sources and uses the
+**maximum** across all readings for fan curve evaluation (since the chassis
+fans cool the entire system).  Both Intel and AMD processors are supported.
 
-| Source | Method | Notes |
-|---|---|---|
-| **CPU** | WMI `MSAcpi_ThermalZoneTemperature` (root\WMI) | Always available; returns ACPI thermal zone temps in tenths of Kelvin, converted to °C. |
-| **GPU** | `nvidia-smi --query-gpu=temperature.gpu` | Optional. Silently skipped if nvidia-smi is not installed or no NVIDIA GPU is present. |
+### CPU temperature
 
-If neither source is available the daemon logs a warning and falls back to
-**manual** mode.
+Sources are tried in priority order; the first one that returns a valid
+reading wins:
+
+| Priority | Source | WMI Namespace | Notes |
+|:--------:|--------|---------------|-------|
+| 1 | `MSAcpi_ThermalZoneTemperature` | `root\WMI` | ACPI thermal zones; tenths of Kelvin → °C.  Works on many Intel systems. |
+| 2 | `Win32_PerfFormattedData_Counters_ThermalZoneInformation` | `root\CIMV2` | Performance-counter thermal zones; Kelvin → °C.  Available on Windows 10 1903+ for **both Intel and AMD**. |
+| 3 | LibreHardwareMonitor `Sensor` | `root\LibreHardwareMonitor` | Requires [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) to be running.  Provides per-core temps for any CPU vendor. |
+| 4 | OpenHardwareMonitor `Sensor` | `root\OpenHardwareMonitor` | Same schema as above but for the older [OpenHardwareMonitor](https://openhardwaremonitor.org). |
+
+### GPU temperature
+
+All available sources are checked and the **maximum** across every detected
+GPU is used.  This handles systems with multiple GPUs (discrete + integrated,
+or multi-GPU configurations):
+
+| Source | Supported GPUs | Notes |
+|--------|---------------|-------|
+| `nvidia-smi` CLI | NVIDIA | Returns one reading per GPU.  Silently skipped if not installed. |
+| LibreHardwareMonitor `Sensor` | NVIDIA, AMD, Intel Arc | Identifies GPUs via `/gpu-nvidia/`, `/gpu-amd/`, `/gpu-intel/` sensor paths. |
+| OpenHardwareMonitor `Sensor` | NVIDIA, AMD, Intel | Same as above. |
+
+> **Tip:** If your CPU temperature shows as *n/a* (common on AMD Ryzen
+> systems where ACPI thermal zones are not populated), install and run
+> [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
+> alongside the daemon.  It provides the most comprehensive temperature
+> coverage for any CPU and GPU vendor.
+
+If no temperature source is available the daemon logs a warning and falls
+back to **manual** mode.
 
 ---
 
@@ -316,7 +342,7 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 | DKMS module autoload | Windows service `start= auto` |
 | `system76-power` profiles | `--profile` flag + `SetProfile` / `GetProfile` IPC |
 | `system76-power` fan curves | `fan_curve.rs` with system76-power-compatible curves |
-| `/sys/class/thermal/` | WMI `MSAcpi_ThermalZoneTemperature` |
+| `/sys/class/thermal/` | WMI multi-source (ACPI, perf counters, LHM/OHM) |
 
 ---
 
