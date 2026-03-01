@@ -89,10 +89,11 @@ static INITIAL_PROFILE: Mutex<Profile> = Mutex::new(Profile::Balanced);
 // ── Entry point ───────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    // Use simple console logging.
-    simple_logger::init_with_level(log::Level::Info).unwrap_or_default();
-
     let args: Vec<String> = env::args().collect();
+
+    // Parse --log-level before initializing the logger.
+    let log_level = parse_log_level_arg(&args);
+    simple_logger::init_with_level(log_level).unwrap_or_default();
 
     // Parse --profile argument (applies to both console and service mode).
     let profile = parse_profile_arg(&args);
@@ -109,6 +110,28 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("service_dispatcher::start failed: {e}"))?;
 
     Ok(())
+}
+
+/// Parse --log-level <level> from args, defaulting to Info.
+/// Accepts: error, warn, info, debug, trace (case-insensitive).
+fn parse_log_level_arg(args: &[String]) -> log::Level {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--log-level" {
+            if let Some(name) = args.get(i + 1) {
+                match name.to_lowercase().as_str() {
+                    "error" => return log::Level::Error,
+                    "warn" => return log::Level::Warn,
+                    "info" => return log::Level::Info,
+                    "debug" => return log::Level::Debug,
+                    "trace" => return log::Level::Trace,
+                    _ => {
+                        eprintln!("Unknown log level '{name}'; using info");
+                    }
+                }
+            }
+        }
+    }
+    log::Level::Info
 }
 
 /// Parse --profile <name> from args, defaulting to Balanced.
