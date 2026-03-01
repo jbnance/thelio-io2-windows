@@ -87,10 +87,10 @@ sc.exe start thelio-io2
 ```
 
 The service starts with the **balanced** profile by default.  To start with a
-different profile, include `--profile` in the binary path:
+different profile or log level, include the flags in the binary path:
 
 ```powershell
-$bin = "$PWD\target\release\thelio-io2-daemon.exe --profile performance"
+$bin = "$PWD\target\release\thelio-io2-daemon.exe --profile performance --log-level debug"
 
 sc.exe create thelio-io2 `
     binPath= "$bin" `
@@ -188,6 +188,14 @@ If neither source is available the daemon logs a warning and falls back to
 
 ## Usage — Daemon
 
+### Command-line options
+
+| Flag | Values | Default | Description |
+|---|---|---|---|
+| `--console` | *(none)* | — | Run as a foreground console process instead of a Windows service. |
+| `--profile` | `quiet`, `balanced`, `performance`, `manual` | `balanced` | Initial fan control profile. |
+| `--log-level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Log verbosity. Use `debug` to see per-poll temperature/PWM details. |
+
 ### Console mode (development / debugging)
 
 ```powershell
@@ -196,12 +204,16 @@ thelio-io2-daemon.exe --console
 
 # Run with a specific profile
 thelio-io2-daemon.exe --console --profile performance
+
+# Run with debug logging to see every temperature poll
+thelio-io2-daemon.exe --console --log-level debug
 ```
 
 ### Service mode
 
 When installed as a Windows service the daemon starts automatically.  The
-`--profile` flag can be passed via the service `binPath` (see Installation).
+`--profile` and `--log-level` flags can be passed via the service `binPath`
+(see Installation).
 
 ---
 
