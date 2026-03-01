@@ -1,32 +1,32 @@
-// src/thermal.rs — CPU / GPU Temperature Reading (multi-source, multi-vendor)
+// src/thermal.rs — CPU / GPU Temperature Reading
+//
+// Temperature data comes from LibreHardwareMonitor (LHM), which must be
+// running alongside the daemon.  LHM exposes a WMI `Sensor` class in
+// root\LibreHardwareMonitor that provides per-component readings for any
+// CPU and GPU vendor (Intel, AMD, NVIDIA, Intel Arc).
 //
 // CPU temperature sources (tried in order until one succeeds):
 //
-//   1. WMI MSAcpi_ThermalZoneTemperature (root\WMI)
-//      Returns temps in tenths of Kelvin; we convert to Celsius.
-//      Works on many Intel systems but often unavailable on AMD.
+//   1. LibreHardwareMonitor WMI (root\LibreHardwareMonitor)
+//      Primary and most reliable source.  Reads CPU die temperature
+//      via LHM's own kernel driver.  Works with Intel and AMD.
 //
-//   2. WMI Win32_PerfFormattedData_Counters_ThermalZoneInformation (root\CIMV2)
-//      Returns temps in Kelvin (whole degrees).
-//      Available on Windows 10 1903+ for both Intel and AMD.
+//   2. WMI MSAcpi_ThermalZoneTemperature (root\WMI)
+//      Fallback.  ACPI thermal zones; tenths of Kelvin → °C.
+//      Works on some Intel systems but often empty on AMD.
 //
-//   3. LibreHardwareMonitor WMI (root\LibreHardwareMonitor)
-//      If LibreHardwareMonitor is running, exposes a Sensor WMI class
-//      with detailed per-core temps for any CPU/GPU vendor.
-//
-//   4. OpenHardwareMonitor WMI (root\OpenHardwareMonitor)
-//      Same schema as above but for the older OHM software.
+//   3. WMI Win32_PerfFormattedData_Counters_ThermalZoneInformation
+//      (root\CIMV2)  Fallback.  Performance-counter thermal zones;
+//      Kelvin → °C.  Reads from the same ACPI data as source 2.
 //
 // GPU temperature sources (all checked, results combined):
 //
-//   1. nvidia-smi CLI for NVIDIA GPUs (returns per-GPU temp).
-//   2. LibreHardwareMonitor / OpenHardwareMonitor WMI for any GPU vendor
-//      (AMD, Intel Arc, NVIDIA).  If nvidia-smi already reported a temp,
-//      duplicates are harmless because we take the max.
+//   1. LibreHardwareMonitor WMI — any GPU vendor.
+//   2. nvidia-smi CLI — NVIDIA GPUs only; supplements LHM.
 //
-// The overall temperature used for fan control is the maximum of CPU and all
-// GPU readings, since the Thelio chassis fans cool the entire system.  Both
-// individual readings are preserved for logging and status display.
+// The overall temperature used for fan control is the maximum of CPU and
+// all GPU readings, since the Thelio chassis fans cool the entire system.
+// Both individual readings are preserved for logging and status display.
 //
 // WMI requires COM initialization on the calling thread; the `wmi` crate
 // handles CoInitialize internally via `COMLibrary::new()`.
@@ -38,6 +38,22 @@ use serde::{Deserialize, Serialize};
 use wmi::{COMLibrary, WMIConnection, WMIError};
 
 // ── WMI query structs ─────────────────────────────────────────────────────
+
+/// LibreHardwareMonitor sensor (root\LibreHardwareMonitor).
+///
+/// Identifiers follow a path format:
+///   CPU:  /intelcpu/0/temperature/0, /amdcpu/0/temperature/0
+///   GPU:  /gpu-nvidia/0/temperature/0, /gpu-amd/0/temperature/0
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Sensor")]
+#[serde(rename_all = "PascalCase")]
+struct HwMonSensor {
+    identifier: String,
+    sensor_type: String,
+    value: f32,
+    #[allow(dead_code)]
+    name: String,
+}
 
 /// ACPI thermal zones (root\WMI).
 /// `CurrentTemperature` is in tenths of a degree Kelvin.
@@ -56,23 +72,6 @@ struct AcpiThermalZone {
 #[serde(rename_all = "PascalCase")]
 struct PerfCounterThermalZone {
     temperature: u32,
-}
-
-/// Hardware-monitor sensor (LibreHardwareMonitor / OpenHardwareMonitor).
-/// Both tools expose a `Sensor` WMI class with the same schema.
-///
-/// Identifiers follow a path format:
-///   CPU:  /intelcpu/0/temperature/0, /amdcpu/0/temperature/0
-///   GPU:  /gpu-nvidia/0/temperature/0, /gpu-amd/0/temperature/0
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Sensor")]
-#[serde(rename_all = "PascalCase")]
-struct HwMonSensor {
-    identifier: String,
-    sensor_type: String,
-    value: f32,
-    #[allow(dead_code)]
-    name: String,
 }
 
 // ── Temperature reading result ───────────────────────────────────────────
@@ -105,25 +104,22 @@ impl ThermalReading {
 
 // ── Public API ───────────────────────────────────────────────────────────
 
-/// Reads CPU and GPU temperatures from multiple sources.
+/// Reads CPU and GPU temperatures via WMI.
 ///
-/// Holds optional WMI connections to several namespaces; at read time the
-/// sources are tried in priority order and the first successful reading
-/// wins for CPU.  GPU temperatures are collected from *all* available
-/// sources and the maximum is used.
+/// Holds optional WMI connections to several namespaces.
+/// LibreHardwareMonitor is the primary source; native WMI classes serve
+/// as fallbacks for CPU temperature only.
 ///
 /// Create one per thread (COM is per-thread).
 pub struct ThermalReader {
     #[allow(dead_code)]
     com: COMLibrary,
-    /// WMI connection to root\WMI for ACPI thermal zones.
-    acpi_conn: Option<WMIConnection>,
-    /// WMI connection to root\CIMV2 for performance-counter thermal data.
-    cimv2_conn: Option<WMIConnection>,
-    /// WMI connection to root\LibreHardwareMonitor (if running).
+    /// WMI connection to root\LibreHardwareMonitor (primary).
     lhm_conn: Option<WMIConnection>,
-    /// WMI connection to root\OpenHardwareMonitor (if running).
-    ohm_conn: Option<WMIConnection>,
+    /// WMI connection to root\WMI for ACPI thermal zones (fallback).
+    acpi_conn: Option<WMIConnection>,
+    /// WMI connection to root\CIMV2 for performance-counter thermal data (fallback).
+    cimv2_conn: Option<WMIConnection>,
 }
 
 /// Error type for thermal reading failures.
@@ -163,26 +159,57 @@ fn fold_max(iter: impl Iterator<Item = f64>) -> Option<f64> {
 
 impl ThermalReader {
     /// Create a new thermal reader.  Initializes COM and attempts to connect
-    /// to all known WMI temperature namespaces.  Connection failures are
-    /// non-fatal — the unavailable source is simply skipped at read time.
+    /// to WMI temperature namespaces.  Connection failures are non-fatal —
+    /// the unavailable source is simply skipped at read time.
     pub fn new() -> Result<Self, ThermalError> {
         let com = COMLibrary::new()?;
 
+        let lhm_conn = try_wmi_connect("root\\LibreHardwareMonitor", com);
         let acpi_conn = try_wmi_connect("root\\WMI", com);
         let cimv2_conn = try_wmi_connect("root\\CIMV2", com);
-        let lhm_conn = try_wmi_connect("root\\LibreHardwareMonitor", com);
-        let ohm_conn = try_wmi_connect("root\\OpenHardwareMonitor", com);
 
         Ok(Self {
             com,
+            lhm_conn,
             acpi_conn,
             cimv2_conn,
-            lhm_conn,
-            ohm_conn,
         })
     }
 
     // ── CPU temperature sources ──────────────────────────────────────────
+
+    /// LibreHardwareMonitor CPU sensors — already in °C.
+    ///
+    /// Filters to sensors whose identifier contains "/cpu", "/intelcpu",
+    /// or "/amdcpu" and whose SensorType is "Temperature".  Returns the
+    /// maximum across all CPU temperature sensors (package + cores).
+    fn read_lhm_cpu_temp(&self, conn: &WMIConnection) -> Option<f64> {
+        let sensors: Vec<HwMonSensor> = match conn.query() {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("LHM sensor query failed: {e}");
+                return None;
+            }
+        };
+
+        fold_max(
+            sensors
+                .iter()
+                .filter(|s| s.sensor_type == "Temperature")
+                .filter(|s| {
+                    let id = s.identifier.to_lowercase();
+                    id.contains("/cpu") || id.contains("/intelcpu") || id.contains("/amdcpu")
+                })
+                .map(|s| {
+                    debug!(
+                        "LHM CPU sensor: {} ({}) = {:.1}°C",
+                        s.name, s.identifier, s.value
+                    );
+                    s.value as f64
+                })
+                .filter(|&c| is_sane_celsius(c)),
+        )
+    }
 
     /// ACPI thermal zones (root\WMI) — tenths of Kelvin → °C.
     fn read_acpi_thermal(&self, conn: &WMIConnection) -> Option<f64> {
@@ -211,7 +238,6 @@ impl ThermalReader {
 
     /// Performance-counter thermal zones (root\CIMV2) — Kelvin → °C.
     ///
-    /// Available on Windows 10 1903+ and works on both Intel and AMD.
     /// The documented unit is whole-degree Kelvin, but some systems report
     /// tenths of Kelvin.  We use a heuristic: values >500 are treated as
     /// tenths (real CPU temps never reach 227 °C / 500 K).
@@ -229,7 +255,6 @@ impl ThermalReader {
                 .iter()
                 .map(|z| {
                     let raw = z.temperature as f64;
-                    // Heuristic: values > 500 are likely tenths-of-Kelvin.
                     let celsius = if raw > 500.0 {
                         (raw / 10.0) - 273.15
                     } else {
@@ -242,40 +267,18 @@ impl ThermalReader {
         )
     }
 
-    /// Hardware-monitor CPU sensors (LHM / OHM) — already in °C.
-    ///
-    /// Filters to sensors whose identifier contains "/cpu", "/intelcpu",
-    /// or "/amdcpu" and whose SensorType is "Temperature".  Returns the
-    /// maximum across all CPU temperature sensors (package + cores).
-    fn read_hwmon_cpu_temp(&self, conn: &WMIConnection) -> Option<f64> {
-        let sensors: Vec<HwMonSensor> = match conn.query() {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("HW-monitor sensor query failed: {e}");
-                return None;
-            }
-        };
-
-        fold_max(
-            sensors
-                .iter()
-                .filter(|s| s.sensor_type == "Temperature")
-                .filter(|s| {
-                    let id = s.identifier.to_lowercase();
-                    id.contains("/cpu") || id.contains("/intelcpu") || id.contains("/amdcpu")
-                })
-                .map(|s| {
-                    debug!("HW-monitor CPU sensor: {} ({}) = {:.1}°C", s.name, s.identifier, s.value);
-                    s.value as f64
-                })
-                .filter(|&c| is_sane_celsius(c)),
-        )
-    }
-
     /// Read the current CPU temperature in °C by trying each source in
     /// priority order.  Returns the first successful reading.
     fn read_cpu_temp(&self) -> Option<f64> {
-        // 1. ACPI Thermal Zone (root\WMI)
+        // 1. LibreHardwareMonitor (primary — works on all vendors)
+        if let Some(ref conn) = self.lhm_conn {
+            if let Some(temp) = self.read_lhm_cpu_temp(conn) {
+                debug!("CPU temp via LibreHardwareMonitor: {temp:.1}°C");
+                return Some(temp);
+            }
+        }
+
+        // 2. ACPI Thermal Zone (fallback)
         if let Some(ref conn) = self.acpi_conn {
             if let Some(temp) = self.read_acpi_thermal(conn) {
                 debug!("CPU temp via ACPI thermal zone: {temp:.1}°C");
@@ -283,26 +286,10 @@ impl ThermalReader {
             }
         }
 
-        // 2. Performance Counters (root\CIMV2)
+        // 3. Performance Counters (fallback)
         if let Some(ref conn) = self.cimv2_conn {
             if let Some(temp) = self.read_perf_counter_thermal(conn) {
                 debug!("CPU temp via performance counters: {temp:.1}°C");
-                return Some(temp);
-            }
-        }
-
-        // 3. LibreHardwareMonitor
-        if let Some(ref conn) = self.lhm_conn {
-            if let Some(temp) = self.read_hwmon_cpu_temp(conn) {
-                debug!("CPU temp via LibreHardwareMonitor: {temp:.1}°C");
-                return Some(temp);
-            }
-        }
-
-        // 4. OpenHardwareMonitor
-        if let Some(ref conn) = self.ohm_conn {
-            if let Some(temp) = self.read_hwmon_cpu_temp(conn) {
-                debug!("CPU temp via OpenHardwareMonitor: {temp:.1}°C");
                 return Some(temp);
             }
         }
@@ -311,6 +298,33 @@ impl ThermalReader {
     }
 
     // ── GPU temperature sources ──────────────────────────────────────────
+
+    /// Collect GPU temperatures from LibreHardwareMonitor WMI.
+    ///
+    /// Filters sensors whose identifier contains "/gpu" (matches
+    /// /gpu-nvidia/, /gpu-amd/, /gpu-intel/, etc.) and whose SensorType
+    /// is "Temperature".  All valid readings are appended to `out`.
+    fn collect_lhm_gpu_temps(&self, conn: &WMIConnection, out: &mut Vec<f64>) {
+        let sensors: Vec<HwMonSensor> = match conn.query() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        for s in sensors
+            .iter()
+            .filter(|s| s.sensor_type == "Temperature")
+            .filter(|s| s.identifier.to_lowercase().contains("/gpu"))
+        {
+            let t = s.value as f64;
+            if is_sane_celsius(t) {
+                debug!(
+                    "LHM GPU sensor: {} ({}) = {:.1}°C",
+                    s.name, s.identifier, t
+                );
+                out.push(t);
+            }
+        }
+    }
 
     /// Collect NVIDIA GPU temperatures via nvidia-smi.
     ///
@@ -339,53 +353,21 @@ impl ThermalReader {
         }
     }
 
-    /// Collect GPU temperatures from a hardware-monitor WMI connection.
-    ///
-    /// Filters sensors whose identifier contains "/gpu" (matches
-    /// /gpu-nvidia/, /gpu-amd/, /gpu-intel/, etc.) and whose SensorType
-    /// is "Temperature".  All valid readings are appended to `out`.
-    fn collect_hwmon_gpu_temps(&self, conn: &WMIConnection, out: &mut Vec<f64>) {
-        let sensors: Vec<HwMonSensor> = match conn.query() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        for s in sensors
-            .iter()
-            .filter(|s| s.sensor_type == "Temperature")
-            .filter(|s| s.identifier.to_lowercase().contains("/gpu"))
-        {
-            let t = s.value as f64;
-            if is_sane_celsius(t) {
-                debug!(
-                    "HW-monitor GPU sensor: {} ({}) = {:.1}°C",
-                    s.name, s.identifier, t
-                );
-                out.push(t);
-            }
-        }
-    }
-
     /// Read GPU temperatures from all available sources and return the max.
     ///
-    /// Temperatures are collected from nvidia-smi (NVIDIA GPUs) and from
-    /// LibreHardwareMonitor / OpenHardwareMonitor (any vendor).  If both
-    /// report the same GPU the duplicate is harmless — we only need the max.
+    /// Temperatures are collected from LibreHardwareMonitor (any vendor)
+    /// and nvidia-smi (NVIDIA only).  If both report the same GPU the
+    /// duplicate is harmless — we only need the max.
     fn read_gpu_temp(&self) -> Option<f64> {
         let mut all_temps: Vec<f64> = Vec::new();
 
-        // 1. NVIDIA GPUs via nvidia-smi
-        self.collect_nvidia_smi_temps(&mut all_temps);
-
-        // 2. Any GPU via LibreHardwareMonitor
+        // 1. Any GPU via LibreHardwareMonitor
         if let Some(ref conn) = self.lhm_conn {
-            self.collect_hwmon_gpu_temps(conn, &mut all_temps);
+            self.collect_lhm_gpu_temps(conn, &mut all_temps);
         }
 
-        // 3. Any GPU via OpenHardwareMonitor
-        if let Some(ref conn) = self.ohm_conn {
-            self.collect_hwmon_gpu_temps(conn, &mut all_temps);
-        }
+        // 2. NVIDIA GPUs via nvidia-smi (supplements LHM)
+        self.collect_nvidia_smi_temps(&mut all_temps);
 
         if all_temps.is_empty() {
             return None;
@@ -446,25 +428,30 @@ impl ThermalReader {
 pub fn try_init() -> Option<ThermalReader> {
     match ThermalReader::new() {
         Ok(reader) => {
-            // Log which WMI namespaces connected successfully.
-            let mut wmi_sources = Vec::new();
-            if reader.acpi_conn.is_some() {
-                wmi_sources.push("ACPI thermal zones (root\\WMI)");
-            }
-            if reader.cimv2_conn.is_some() {
-                wmi_sources.push("performance counters (root\\CIMV2)");
-            }
+            // Log primary source status.
             if reader.lhm_conn.is_some() {
-                wmi_sources.push("LibreHardwareMonitor");
-            }
-            if reader.ohm_conn.is_some() {
-                wmi_sources.push("OpenHardwareMonitor");
+                info!("LibreHardwareMonitor WMI connected (primary temperature source)");
+            } else {
+                warn!(
+                    "LibreHardwareMonitor WMI not available — \
+                     is LibreHardwareMonitor running?"
+                );
+                warn!(
+                    "Falling back to native WMI thermal sources \
+                     (may not work on all systems)"
+                );
             }
 
-            if wmi_sources.is_empty() {
-                warn!("No WMI temperature namespaces available");
-            } else {
-                info!("WMI temperature sources: {}", wmi_sources.join(", "));
+            // Log fallback source status.
+            let mut fallbacks = Vec::new();
+            if reader.acpi_conn.is_some() {
+                fallbacks.push("ACPI thermal zones");
+            }
+            if reader.cimv2_conn.is_some() {
+                fallbacks.push("performance counters");
+            }
+            if !fallbacks.is_empty() {
+                debug!("Fallback WMI sources: {}", fallbacks.join(", "));
             }
 
             // Check nvidia-smi availability.
@@ -478,7 +465,7 @@ pub fn try_init() -> Option<ThermalReader> {
                     debug!("nvidia-smi found but returned error (no NVIDIA GPU?)");
                 }
                 Err(_) => {
-                    info!("nvidia-smi not found; NVIDIA GPU temps via WMI only");
+                    info!("nvidia-smi not found; GPU temps via LibreHardwareMonitor only");
                 }
             }
 
