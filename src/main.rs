@@ -63,7 +63,7 @@ use crate::{
     fan_curve::{Profile, TempHysteresis},
     ipc::IpcRequest,
     power::PowerEvent,
-    thermal::ThermalReader,
+    thermal::{ThermalReader, ThermalReading},
 };
 
 // ── Service name ───────────────────────────────────────────────────────────
@@ -274,7 +274,7 @@ fn device_loop(
     let thermal_reader = thermal::try_init();
     let mut hysteresis = TempHysteresis::new(2.0);
     let mut last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
-    let mut last_temp_c: Option<f64> = None;
+    let mut last_reading: Option<ThermalReading> = None;
     let mut last_pwm: Option<u8> = None;
     let mut last_status_log = Instant::now() - STATUS_LOG_INTERVAL;
 
@@ -347,7 +347,7 @@ fn device_loop(
                         &mut device,
                         req.command,
                         &mut current_profile,
-                        last_temp_c,
+                        &last_reading,
                         &thermal_reader,
                     );
                     let _ = req.reply.send(response);
@@ -366,16 +366,15 @@ fn device_loop(
 
             if let Some(curve) = current_profile.curve() {
                 if let Some(ref reader) = thermal_reader {
-                    match reader.read_max_temp() {
-                        Ok(raw_temp) => {
-                            let eff_temp = hysteresis.update(raw_temp);
-                            last_temp_c = Some(raw_temp);
+                    match reader.read_temps() {
+                        Ok(reading) => {
+                            let eff_temp = hysteresis.update(reading.max_c);
                             let pwm = curve.duty_pwm(eff_temp);
 
                             // Log every poll at DEBUG level.
                             debug!(
-                                "Poll: {:.1}°C (eff {:.1}°C) → PWM {pwm} ({:.0}%) [{}]",
-                                raw_temp,
+                                "Poll: {} (eff {:.1}°C) → PWM {pwm} ({:.0}%) [{}]",
+                                reading.summary(),
                                 eff_temp,
                                 pwm as f64 / 255.0 * 100.0,
                                 current_profile,
@@ -385,13 +384,15 @@ fn device_loop(
                             let pwm_changed = last_pwm != Some(pwm);
                             if pwm_changed {
                                 info!(
-                                    "Fan speed change: {:.1}°C → PWM {} ({:.0}%) [{}]",
-                                    raw_temp,
+                                    "Fan speed change: {} → PWM {} ({:.0}%) [{}]",
+                                    reading.summary(),
                                     pwm,
                                     pwm as f64 / 255.0 * 100.0,
                                     current_profile,
                                 );
                             }
+
+                            last_reading = Some(reading);
 
                             if let Some(ref mut d) = device {
                                 let fan_count = d.fan_count();
@@ -424,19 +425,18 @@ fn device_loop(
         if last_status_log.elapsed() >= STATUS_LOG_INTERVAL {
             last_status_log = Instant::now();
             let dev_status = if device.is_some() { "connected" } else { "not connected" };
-            match (last_temp_c, last_pwm) {
-                (Some(t), Some(p)) => info!(
-                    "Status: device {dev_status}, profile={}, temp={:.1}°C, PWM={p} ({:.0}%)",
+            let temp_str = last_reading
+                .as_ref()
+                .map(|r| r.summary())
+                .unwrap_or_else(|| "unavailable".into());
+            match last_pwm {
+                Some(p) => info!(
+                    "Status: device {dev_status}, profile={}, {temp_str}, PWM={p} ({:.0}%)",
                     current_profile,
-                    t,
                     p as f64 / 255.0 * 100.0,
                 ),
-                (Some(t), None) => info!(
-                    "Status: device {dev_status}, profile={}, temp={:.1}°C, PWM=pending",
-                    current_profile, t,
-                ),
-                _ => info!(
-                    "Status: device {dev_status}, profile={}, temp=unavailable",
+                None => info!(
+                    "Status: device {dev_status}, profile={}, {temp_str}, PWM=pending",
                     current_profile,
                 ),
             }
@@ -453,7 +453,7 @@ fn handle_request(
     device: &mut Option<Box<dyn Device>>,
     cmd: DeviceCommand,
     current_profile: &mut Profile,
-    last_temp_c: Option<f64>,
+    last_reading: &Option<ThermalReading>,
     thermal_reader: &Option<ThermalReader>,
 ) -> IpcResponse {
     match cmd {
@@ -520,7 +520,9 @@ fn handle_request(
                     *current_profile = p;
                     IpcResponse::ProfileInfo {
                         profile: p.to_string(),
-                        temp_c: last_temp_c,
+                        cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
+                        gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
+                        temp_c: last_reading.as_ref().map(|r| r.max_c),
                     }
                 }
                 None => IpcResponse::Error(DeviceError::Comm(format!(
@@ -531,7 +533,9 @@ fn handle_request(
 
         DeviceCommand::GetProfile => IpcResponse::ProfileInfo {
             profile: current_profile.to_string(),
-            temp_c: last_temp_c,
+            cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
+            gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
+            temp_c: last_reading.as_ref().map(|r| r.max_c),
         },
     }
 }

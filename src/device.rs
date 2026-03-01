@@ -71,6 +71,8 @@ pub enum IpcResponse {
     /// Current profile name and temperature info.
     ProfileInfo {
         profile: String,
+        cpu_temp_c: Option<f64>,
+        gpu_temp_c: Option<f64>,
         temp_c: Option<f64>,
     },
 }
