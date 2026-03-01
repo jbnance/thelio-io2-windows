@@ -7,8 +7,9 @@
 // GPU temperature: queried via nvidia-smi (optional).  If nvidia-smi is not
 //   present or no NVIDIA GPU is found, GPU temperature is silently skipped.
 //
-// The overall temperature reported is the maximum of CPU and GPU readings,
-// since the Thelio chassis fans cool the entire system.
+// The overall temperature used for fan control is the maximum of CPU and GPU,
+// since the Thelio chassis fans cool the entire system.  Both individual
+// readings are preserved for logging and status display.
 //
 // WMI requires COM initialization on the calling thread; the `wmi` crate
 // handles CoInitialize internally.
@@ -16,7 +17,7 @@
 use std::process::Command;
 
 use log::{debug, info, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wmi::{COMLibrary, WMIConnection, WMIError};
 
 // ── WMI query struct ─────────────────────────────────────────────────────
@@ -28,6 +29,34 @@ use wmi::{COMLibrary, WMIConnection, WMIError};
 #[serde(rename_all = "PascalCase")]
 struct ThermalZone {
     current_temperature: u32,
+}
+
+// ── Temperature reading result ───────────────────────────────────────────
+
+/// A snapshot of all temperature readings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThermalReading {
+    /// CPU temperature in °C, or `None` if unavailable.
+    pub cpu_c: Option<f64>,
+    /// GPU temperature in °C, or `None` if unavailable / no NVIDIA GPU.
+    pub gpu_c: Option<f64>,
+    /// Maximum of CPU and GPU — used for fan curve evaluation.
+    pub max_c: f64,
+}
+
+impl ThermalReading {
+    /// Format a compact summary string for logging.
+    pub fn summary(&self) -> String {
+        let cpu = self
+            .cpu_c
+            .map(|t| format!("{:.1}°C", t))
+            .unwrap_or_else(|| "n/a".into());
+        let gpu = self
+            .gpu_c
+            .map(|t| format!("{:.1}°C", t))
+            .unwrap_or_else(|| "n/a".into());
+        format!("CPU={cpu} GPU={gpu} max={:.1}°C", self.max_c)
+    }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -129,24 +158,30 @@ impl ThermalReader {
         max
     }
 
-    /// Read the maximum temperature across all sources (CPU + GPU) in °C.
+    /// Read temperatures from all sources and return a `ThermalReading`.
     ///
-    /// Returns the highest of CPU and GPU temperatures.  If one source is
-    /// unavailable, the other is used.  Returns an error only if *no*
-    /// source provides a reading.
-    pub fn read_max_temp(&self) -> Result<f64, ThermalError> {
+    /// Returns individual CPU and GPU temperatures plus the overall max.
+    /// The max is used for fan curve evaluation.  Returns an error only if
+    /// *no* source provides a reading.
+    pub fn read_temps(&self) -> Result<ThermalReading, ThermalError> {
         let cpu = self.read_cpu_temp();
         let gpu = self.read_gpu_temp();
 
-        match (cpu, gpu) {
-            (Some(c), Some(g)) => {
-                debug!("CPU: {c:.1}°C, GPU: {g:.1}°C → max {:.1}°C", c.max(g));
-                Ok(c.max(g))
-            }
-            (Some(c), None) => Ok(c),
-            (None, Some(g)) => Ok(g),
-            (None, None) => Err(ThermalError::NoSources),
-        }
+        let max_c = match (cpu, gpu) {
+            (Some(c), Some(g)) => c.max(g),
+            (Some(c), None) => c,
+            (None, Some(g)) => g,
+            (None, None) => return Err(ThermalError::NoSources),
+        };
+
+        let reading = ThermalReading {
+            cpu_c: cpu,
+            gpu_c: gpu,
+            max_c,
+        };
+
+        debug!("Thermal: {}", reading.summary());
+        Ok(reading)
     }
 }
 
@@ -157,9 +192,9 @@ pub fn try_init() -> Option<ThermalReader> {
     match ThermalReader::new() {
         Ok(reader) => {
             // Do a test read to make sure it actually works.
-            match reader.read_max_temp() {
-                Ok(temp) => {
-                    info!("Thermal reader initialized; current temp: {:.1}°C", temp);
+            match reader.read_temps() {
+                Ok(reading) => {
+                    info!("Thermal reader initialized; {}", reading.summary());
                     Some(reader)
                 }
                 Err(e) => {

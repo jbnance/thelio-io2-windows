@@ -62,6 +62,8 @@ enum IpcResponse {
     Error(DeviceError),
     ProfileInfo {
         profile: String,
+        cpu_temp_c: Option<f64>,
+        gpu_temp_c: Option<f64>,
         temp_c: Option<f64>,
     },
 }
@@ -91,18 +93,30 @@ fn send_command(cmd: &DeviceCommand) -> Result<IpcResponse> {
     Ok(response)
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+fn format_temp(label: &str, temp: Option<f64>) -> String {
+    match temp {
+        Some(t) => format!("{label}: {t:.1}°C"),
+        None => format!("{label}: n/a"),
+    }
+}
+
+fn print_temps(cpu_temp_c: Option<f64>, gpu_temp_c: Option<f64>, temp_c: Option<f64>) {
+    let cpu = format_temp("CPU", cpu_temp_c);
+    let gpu = format_temp("GPU", gpu_temp_c);
+    let max = format_temp("Max", temp_c);
+    println!("  {cpu}  |  {gpu}  |  {max}");
+}
+
 // ── Command handlers ────────────────────────────────────────────────────
 
 fn cmd_status() -> Result<()> {
     // Fetch profile + temperature first.
     match send_command(&DeviceCommand::GetProfile)? {
-        IpcResponse::ProfileInfo { profile, temp_c } => {
-            print!("Profile: {profile}");
-            if let Some(t) = temp_c {
-                println!("  |  Temperature: {:.1}°C", t);
-            } else {
-                println!("  |  Temperature: unavailable");
-            }
+        IpcResponse::ProfileInfo { profile, cpu_temp_c, gpu_temp_c, temp_c } => {
+            println!("Profile: {profile}");
+            print_temps(cpu_temp_c, gpu_temp_c, temp_c);
         }
         // Non-fatal — profile info is supplemental; continue to fan data.
         _ => {}
@@ -149,13 +163,9 @@ fn cmd_set_pwm(channel: usize, pwm: u8) -> Result<()> {
 
 fn cmd_profile() -> Result<()> {
     match send_command(&DeviceCommand::GetProfile)? {
-        IpcResponse::ProfileInfo { profile, temp_c } => {
+        IpcResponse::ProfileInfo { profile, cpu_temp_c, gpu_temp_c, temp_c } => {
             println!("Active profile: {profile}");
-            if let Some(t) = temp_c {
-                println!("CPU temperature: {:.1}°C", t);
-            } else {
-                println!("CPU temperature: unavailable");
-            }
+            print_temps(cpu_temp_c, gpu_temp_c, temp_c);
         }
         IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
         other => bail!("Unexpected response: {other:?}"),
@@ -167,11 +177,9 @@ fn cmd_set_profile(name: &str) -> Result<()> {
     match send_command(&DeviceCommand::SetProfile {
         profile: name.to_string(),
     })? {
-        IpcResponse::ProfileInfo { profile, temp_c } => {
+        IpcResponse::ProfileInfo { profile, cpu_temp_c, gpu_temp_c, temp_c } => {
             println!("Profile set to: {profile}");
-            if let Some(t) = temp_c {
-                println!("CPU temperature: {:.1}°C", t);
-            }
+            print_temps(cpu_temp_c, gpu_temp_c, temp_c);
         }
         IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
         other => bail!("Unexpected response: {other:?}"),
