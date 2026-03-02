@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Build release binaries
+        run: cargo build --release --verbose
+
+      - name: Determine version from tag
+        id: version
+        shell: bash
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $staging = "thelio-io2-windows-$tag"
+
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target\release\thelio-io2-daemon.exe" $staging
+          Copy-Item "target\release\thelio-io2-client.exe" $staging
+          Copy-Item "README.md" $staging
+
+          if (Test-Path "LICENSE") {
+              Copy-Item "LICENSE" $staging
+          }
+
+          Compress-Archive -Path "$staging\*" -DestinationPath "$staging.zip"
+          echo "ASSET=$staging.zip" >> $env:GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
