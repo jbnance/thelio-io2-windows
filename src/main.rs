@@ -26,7 +26,7 @@
 //         │          │          │
 //   ┌─────▼──────┐ ┌▼────────┐ ┌▼──────────────┐
 //   │ IPC Server │ │ Power   │ │ Thermal Reader │
-//   │ (thread)   │ │ Monitor │ │ (WMI)          │
+//   │ (thread)   │ │ Monitor │ │ (LHM HTTP)     │
 //   └────────────┘ └─────────┘ └────────────────┘
 
 mod device;
@@ -64,7 +64,7 @@ use crate::{
     fan_curve::{Profile, TempHysteresis},
     ipc::IpcRequest,
     power::PowerEvent,
-    thermal::{ThermalReader, ThermalReading},
+    thermal::{LhmConfig, ThermalReader, ThermalReading},
 };
 
 // ── Service name ───────────────────────────────────────────────────────────
@@ -91,6 +91,9 @@ static INITIAL_PROFILE: Mutex<Profile> = Mutex::new(Profile::Balanced);
 /// (which runs on a separate OS thread) to tell the device loop to exit.
 static CONSOLE_STOP_TX: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
 
+/// LHM connection configuration, parsed once in main() and read by device_loop().
+static LHM_CONFIG: OnceLock<LhmConfig> = OnceLock::new();
+
 // ── Entry point ───────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -104,6 +107,11 @@ fn main() -> Result<()> {
     let profile = parse_profile_arg(&args);
     *INITIAL_PROFILE.lock() = profile;
     info!("Initial profile: {profile}");
+
+    // Parse LHM connection settings (applies to both console and service mode).
+    let lhm_config = parse_lhm_config(&args);
+    info!("LHM URL: {}", lhm_config.url);
+    LHM_CONFIG.set(lhm_config).ok();
 
     if args.iter().any(|a| a == "--console") {
         info!("Running in console mode (--console)");
@@ -153,6 +161,39 @@ fn parse_profile_arg(args: &[String]) -> Profile {
         }
     }
     Profile::Balanced
+}
+
+/// Parse LHM connection settings from CLI args.
+///
+/// Flags:
+///   --lhm-url <url>         Base URL (default: http://localhost:8085)
+///   --lhm-user <username>   HTTP Basic Auth username (optional)
+///   --lhm-password <pass>   HTTP Basic Auth password (optional)
+fn parse_lhm_config(args: &[String]) -> LhmConfig {
+    let mut config = LhmConfig::default();
+
+    for (i, arg) in args.iter().enumerate() {
+        match arg.as_str() {
+            "--lhm-url" => {
+                if let Some(url) = args.get(i + 1) {
+                    config.url = url.clone();
+                }
+            }
+            "--lhm-user" => {
+                if let Some(user) = args.get(i + 1) {
+                    config.username = Some(user.clone());
+                }
+            }
+            "--lhm-password" => {
+                if let Some(pass) = args.get(i + 1) {
+                    config.password = Some(pass.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    config
 }
 
 // ── Console (debug) mode ───────────────────────────────────────────────────
@@ -304,7 +345,8 @@ fn device_loop(
 
     // ── Thermal / fan control state ──────────────────────────────────────
     let mut current_profile = initial_profile;
-    let thermal_reader = thermal::try_init();
+    let lhm_config = LHM_CONFIG.get().expect("LHM_CONFIG not initialized");
+    let thermal_reader = thermal::try_init(lhm_config);
     let mut hysteresis = TempHysteresis::new(2.0);
     let mut last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
     let mut last_reading: Option<ThermalReading> = None;

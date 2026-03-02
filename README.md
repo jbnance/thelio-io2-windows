@@ -28,7 +28,7 @@ on System76 Thelio desktop computers running Windows.
 │       │          │              │                                │
 │  ┌────▼─────┐ ┌──▼──────────┐ ┌▼───────────────┐               │
 │  │   IPC    │ │   Power     │ │ Thermal Reader  │               │
-│  │  Server  │ │   Events    │ │ (LHM WMI +      │               │
+│  │  Server  │ │   Events    │ │ (LHM HTTP +      │               │
 │  │ (thread) │ │ (SCM ctrl)  │ │  nvidia-smi)    │               │
 │  └──────────┘ └─────────────┘ └─────────────────┘               │
 └─────────────────────────────────────────────────────────────────┘
@@ -47,22 +47,27 @@ on System76 Thelio desktop computers running Windows.
 ### LibreHardwareMonitor (required for temperature monitoring)
 
 [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-must be installed and **running** for the daemon to read CPU and GPU
-temperatures.  It exposes sensor data via WMI, which is the only reliable
-way to read CPU die temperature on Windows across both Intel and AMD
-processors.
+must be installed and **running** with its built-in HTTP web server enabled
+for the daemon to read CPU and GPU temperatures.  LHM uses a kernel driver
+to read CPU die temperature, which is the only reliable method on Windows
+across both Intel and AMD processors.
 
 1. Download the latest release from the
    [LibreHardwareMonitor releases page](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases).
 2. Run `LibreHardwareMonitor.exe` (no installation required).
-3. Optionally configure LHM to start automatically with Windows
+3. Enable the web server: **Options → HTTP Server**.  The default port is
+   **8085**.  You can verify it works by visiting `http://localhost:8085`
+   in a browser.
+4. Optionally configure LHM to start automatically with Windows
    (Options → Run On Windows Startup).
 
-> **Note:** Without LibreHardwareMonitor the daemon falls back to native
-> WMI thermal sources (ACPI thermal zones), which do not work on many
-> systems — particularly AMD Ryzen.  If no temperature source is available
-> the daemon switches to **manual** mode and fans must be controlled
-> explicitly.
+> **Note:** For AMD Ryzen processors you may also need to install the
+> [PawnIO driver](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/wiki/PawnIO)
+> for LHM to read CPU temperatures.
+
+> **Note:** Without LibreHardwareMonitor the daemon has no temperature
+> source and switches to **manual** mode — fans must be controlled
+> explicitly via the CLI client.
 
 ### Thelio Io 2
 
@@ -201,14 +206,10 @@ the entire system).  Both Intel and AMD processors are supported.
 
 ### CPU temperature
 
-Sources are tried in priority order; the first one that returns a valid
-reading wins:
-
-| Priority | Source | Notes |
-|:--------:|--------|-------|
-| 1 | **LibreHardwareMonitor** WMI (`root\LibreHardwareMonitor`) | Primary source.  Reads CPU die temperature via LHM's kernel driver.  Works with any CPU vendor (Intel, AMD). |
-| 2 | `MSAcpi_ThermalZoneTemperature` (`root\WMI`) | Fallback.  ACPI thermal zones.  Works on some Intel systems but often empty on AMD. |
-| 3 | `Win32_PerfFormattedData_Counters_ThermalZoneInformation` (`root\CIMV2`) | Fallback.  Performance-counter thermal zones.  Reads from the same ACPI data as source 2. |
+The daemon connects to LHM's built-in HTTP web server and fetches the
+`/data.json` sensor tree every 2 seconds.  CPU temperature sensors are
+identified by sensor IDs containing `/cpu`, `/intelcpu`, or `/amdcpu`.
+The maximum across all CPU temperature sensors is used.
 
 ### GPU temperature
 
@@ -218,7 +219,7 @@ or multi-GPU configurations):
 
 | Source | Supported GPUs | Notes |
 |--------|---------------|-------|
-| **LibreHardwareMonitor** WMI | NVIDIA, AMD, Intel Arc | Identifies GPUs via `/gpu-nvidia/`, `/gpu-amd/`, `/gpu-intel/` sensor paths. |
+| **LibreHardwareMonitor** HTTP | NVIDIA, AMD, Intel Arc | Identifies GPUs via `/gpu` sensor ID paths. |
 | `nvidia-smi` CLI | NVIDIA | Returns one reading per GPU.  Supplements LHM; silently skipped if not installed. |
 
 If no temperature source is available the daemon logs a warning and falls
@@ -235,6 +236,9 @@ back to **manual** mode.
 | `--console` | *(none)* | — | Run as a foreground console process instead of a Windows service. |
 | `--profile` | `quiet`, `balanced`, `performance`, `manual` | `balanced` | Initial fan control profile. |
 | `--log-level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Log verbosity. Use `debug` to see per-poll temperature/PWM details. |
+| `--lhm-url` | URL (scheme://host:port) | `http://localhost:8085` | LibreHardwareMonitor web server URL. |
+| `--lhm-user` | username | *(none)* | HTTP Basic Auth username for LHM (optional). |
+| `--lhm-password` | password | *(none)* | HTTP Basic Auth password for LHM (optional). |
 
 ### Console mode (development / debugging)
 
@@ -356,7 +360,7 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 | DKMS module autoload | Windows service `start= auto` |
 | `system76-power` profiles | `--profile` flag + `SetProfile` / `GetProfile` IPC |
 | `system76-power` fan curves | `fan_curve.rs` with system76-power-compatible curves |
-| `/sys/class/thermal/` | LibreHardwareMonitor WMI (+ ACPI fallback) |
+| `/sys/class/thermal/` | LibreHardwareMonitor HTTP API (+ nvidia-smi) |
 
 ---
 
