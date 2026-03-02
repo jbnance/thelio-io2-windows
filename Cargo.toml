@@ -52,6 +52,7 @@ features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Console",
+    "Win32_System_EventLog",
 ]
 
 [profile.release]

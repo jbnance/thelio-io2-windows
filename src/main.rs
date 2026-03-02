@@ -30,6 +30,7 @@
 //   └────────────┘ └─────────┘ └────────────────┘
 
 mod device;
+mod eventlog;
 mod fan_curve;
 mod ipc;
 mod power;
@@ -81,6 +82,13 @@ const THERMAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
 // Individual poll results are logged at DEBUG level.
 const STATUS_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+// How often to retry connecting to LHM when the thermal reader is unavailable.
+const LHM_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+// After this many consecutive HTTP failures, declare LHM disconnected and
+// switch to manual mode until the connection is restored.
+const MAX_CONSECUTIVE_HTTP_FAILURES: u32 = 5;
+
 // ── Shared state for profile (accessible from SCM handler thread) ────────
 // The SCM handler runs on a different thread, so we use a static Mutex for
 // the initial profile setting.  The actual mutable profile state lives in
@@ -99,9 +107,16 @@ static LHM_CONFIG: OnceLock<LhmConfig> = OnceLock::new();
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    // Parse --log-level before initializing the logger.
+    // Determine mode and log level before initializing the logger.
     let log_level = parse_log_level_arg(&args);
-    simple_logger::init_with_level(log_level).unwrap_or_default();
+    let console_mode = args.iter().any(|a| a == "--console");
+
+    // Use stdout logger in console mode, Windows Event Log in service mode.
+    if console_mode {
+        simple_logger::init_with_level(log_level).unwrap_or_default();
+    } else {
+        eventlog::init(log_level);
+    }
 
     // Parse --profile argument (applies to both console and service mode).
     let profile = parse_profile_arg(&args);
@@ -113,7 +128,7 @@ fn main() -> Result<()> {
     info!("LHM URL: {}", lhm_config.url);
     LHM_CONFIG.set(lhm_config).ok();
 
-    if args.iter().any(|a| a == "--console") {
+    if console_mode {
         info!("Running in console mode (--console)");
         return run_console(profile);
     }
@@ -346,17 +361,26 @@ fn device_loop(
     // ── Thermal / fan control state ──────────────────────────────────────
     let mut current_profile = initial_profile;
     let lhm_config = LHM_CONFIG.get().expect("LHM_CONFIG not initialized");
-    let thermal_reader = thermal::try_init(lhm_config);
+    let mut thermal_reader = thermal::try_init(lhm_config);
     let mut hysteresis = TempHysteresis::new(2.0);
     let mut last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
     let mut last_reading: Option<ThermalReading> = None;
     let mut last_pwm: Option<u8> = None;
     let mut last_status_log = Instant::now() - STATUS_LOG_INTERVAL;
 
+    // LHM retry state: when the thermal reader is unavailable, we periodically
+    // attempt to reconnect.  `desired_profile` remembers what profile the user
+    // (or startup config) requested so we can restore it when LHM returns.
+    let mut desired_profile = initial_profile;
+    let mut last_lhm_retry = Instant::now();
+    let mut consecutive_http_failures: u32 = 0;
+
     if thermal_reader.is_none() && !matches!(current_profile, Profile::Manual) {
         warn!(
             "No thermal reader available; switching profile to manual. \
-             Fan speeds must be set via the client."
+             Fan speeds must be set via the client. \
+             Will retry LHM connection every {} seconds.",
+            LHM_RETRY_INTERVAL.as_secs(),
         );
         current_profile = Profile::Manual;
     }
@@ -422,6 +446,7 @@ fn device_loop(
                         &mut device,
                         req.command,
                         &mut current_profile,
+                        &mut desired_profile,
                         &last_reading,
                         &thermal_reader,
                     );
@@ -435,6 +460,41 @@ fn device_loop(
             }
         }
 
+        // ── LHM reconnection ──────────────────────────────────────────────
+        // If the thermal reader is unavailable, periodically attempt to
+        // reconnect.  This handles both "LHM was not running at daemon
+        // startup" and "LHM went down while the daemon was running".
+        if thermal_reader.is_none()
+            && last_lhm_retry.elapsed() >= LHM_RETRY_INTERVAL
+        {
+            last_lhm_retry = Instant::now();
+            debug!("Retrying LHM connection at {}...", lhm_config.url);
+            match thermal::try_init(lhm_config) {
+                Some(reader) => {
+                    info!(
+                        "LHM connection established — resuming automatic fan control"
+                    );
+                    thermal_reader = Some(reader);
+                    consecutive_http_failures = 0;
+
+                    // Restore the user's desired profile if we had forced
+                    // manual mode due to a missing thermal reader.
+                    if matches!(current_profile, Profile::Manual)
+                        && !matches!(desired_profile, Profile::Manual)
+                    {
+                        current_profile = desired_profile;
+                        info!("Restored profile: {current_profile}");
+                    }
+                }
+                None => {
+                    warn!(
+                        "LHM retry failed; next attempt in {} seconds",
+                        LHM_RETRY_INTERVAL.as_secs()
+                    );
+                }
+            }
+        }
+
         // ── Thermal polling + automatic fan control ────────────────────────
         if last_temp_poll.elapsed() >= THERMAL_POLL_INTERVAL {
             last_temp_poll = Instant::now();
@@ -443,6 +503,7 @@ fn device_loop(
                 if let Some(ref reader) = thermal_reader {
                     match reader.read_temps() {
                         Ok(reading) => {
+                            consecutive_http_failures = 0;
                             let eff_temp = hysteresis.update(reading.max_c);
                             let pwm = curve.duty_pwm(eff_temp);
 
@@ -489,7 +550,25 @@ fn device_loop(
                             }
                         }
                         Err(e) => {
-                            warn!("Temperature read failed: {e}");
+                            consecutive_http_failures += 1;
+                            warn!(
+                                "Temperature read failed ({consecutive_http_failures}/\
+                                 {MAX_CONSECUTIVE_HTTP_FAILURES}): {e}"
+                            );
+
+                            if consecutive_http_failures >= MAX_CONSECUTIVE_HTTP_FAILURES {
+                                warn!(
+                                    "LHM connection lost after {} consecutive failures; \
+                                     switching to manual mode. Will retry every {} seconds.",
+                                    consecutive_http_failures,
+                                    LHM_RETRY_INTERVAL.as_secs(),
+                                );
+                                thermal_reader = None;
+                                last_lhm_retry = Instant::now();
+                                if !matches!(current_profile, Profile::Manual) {
+                                    current_profile = Profile::Manual;
+                                }
+                            }
                         }
                     }
                 }
@@ -528,6 +607,7 @@ fn handle_request(
     device: &mut Option<Box<dyn Device>>,
     cmd: DeviceCommand,
     current_profile: &mut Profile,
+    desired_profile: &mut Profile,
     last_reading: &Option<ThermalReading>,
     thermal_reader: &Option<ThermalReader>,
 ) -> IpcResponse {
@@ -587,12 +667,18 @@ fn handle_request(
                 Some(p) => {
                     // Don't allow non-manual profile if we have no thermal reader
                     if !matches!(p, Profile::Manual) && thermal_reader.is_none() {
+                        // Record the desired profile so it can be restored
+                        // when LHM reconnects.
+                        *desired_profile = p;
                         return IpcResponse::Error(DeviceError::Comm(
-                            "Cannot set automatic profile: thermal reader unavailable".into(),
+                            "Cannot set automatic profile: thermal reader unavailable. \
+                             Profile will activate when LHM reconnects."
+                                .into(),
                         ));
                     }
                     info!("Profile changed: {} → {}", current_profile, p);
                     *current_profile = p;
+                    *desired_profile = p;
                     IpcResponse::ProfileInfo {
                         profile: p.to_string(),
                         cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
