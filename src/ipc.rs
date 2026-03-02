@@ -11,8 +11,11 @@
 // that the service loop is not blocked.  Commands that require device access
 // are forwarded to the device thread via channels.
 //
-// Security: the pipe ACL is set to allow access by the local Administrators
-// group and SYSTEM only.  Non-elevated callers cannot change fan speeds.
+// Security: the pipe uses default Windows security which allows any local
+// user to connect.  The Thelio Io 2 commands are non-destructive (fan speed
+// control), so restricting to Administrators is not required.  If you need
+// to restrict access, pass a SECURITY_ATTRIBUTES structure to
+// CreateNamedPipeW instead of `None`.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -111,7 +114,7 @@ fn listener_loop(pipe_name: &[u16], device_tx: &Sender<IpcRequest>) -> Result<()
                 PIPE_BUF_SIZE,
                 PIPE_BUF_SIZE,
                 PIPE_TIMEOUT_MS,
-                None, // default security (allows any local user)
+                None, // default security — any local user can connect
             );
 
             if handle == INVALID_HANDLE_VALUE {
@@ -203,9 +206,16 @@ fn handle_client(pipe: HANDLE, device_tx: Sender<IpcRequest>) {
             }
         };
 
-        let mut json = serde_json::to_string(&response).unwrap_or_default();
+        let mut json = match serde_json::to_string(&response) {
+            Ok(j) => j,
+            Err(e) => {
+                error!("IPC: failed to serialize response: {e}");
+                break;
+            }
+        };
         json.push('\n');
-        if writer.write_all(json.as_bytes()).is_err() {
+        if let Err(e) = writer.write_all(json.as_bytes()) {
+            warn!("IPC: write to client failed: {e}");
             break;
         }
     }

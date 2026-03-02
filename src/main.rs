@@ -218,6 +218,9 @@ fn run_console(profile: Profile) -> Result<()> {
     info!("Profile: {profile}");
     info!("Press Ctrl+C to stop.");
 
+    // In console mode we don't monitor power events, but the device loop
+    // still expects a Receiver<PowerEvent>.  The sender is intentionally
+    // unused (prefixed with `_`).
     let (_power_tx, power_rx) = channel::<PowerEvent>();
     let (device_tx, device_rx) = channel::<IpcRequest>();
     let (stop_tx, stop_rx) = channel::<()>();
@@ -445,7 +448,10 @@ fn device_loop(
         }
 
         // ── IPC requests ───────────────────────────────────────────────────
-        for _ in 0..10 {
+        // Process up to MAX_IPC_BATCH requests per loop iteration to keep
+        // the loop responsive to power events and thermal polling.
+        const MAX_IPC_BATCH: usize = 10;
+        for _ in 0..MAX_IPC_BATCH {
             match ipc_rx.try_recv() {
                 Ok(req) => {
                     let response = handle_request(
@@ -634,7 +640,9 @@ fn device_loop(
             }
         }
 
-        // Brief sleep to avoid spinning 100% CPU.
+        // Brief sleep to avoid spinning 100% CPU.  20 ms gives ~50 Hz loop
+        // frequency, which is fast enough for responsive IPC handling while
+        // consuming negligible CPU.
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -768,4 +776,159 @@ fn local_day_key() -> (u16, u16, u16) {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let st = unsafe { GetLocalTime() };
     (st.wYear, st.wMonth, st.wDay)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build an args vec from a string slice.
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── parse_log_level_arg ─────────────────────────────────────────────
+
+    #[test]
+    fn log_level_default_is_info() {
+        assert_eq!(parse_log_level_arg(&args(&["daemon"])), log::Level::Info);
+    }
+
+    #[test]
+    fn log_level_debug() {
+        assert_eq!(
+            parse_log_level_arg(&args(&["daemon", "--log-level", "debug"])),
+            log::Level::Debug,
+        );
+    }
+
+    #[test]
+    fn log_level_case_insensitive() {
+        assert_eq!(
+            parse_log_level_arg(&args(&["daemon", "--log-level", "WARN"])),
+            log::Level::Warn,
+        );
+    }
+
+    #[test]
+    fn log_level_error() {
+        assert_eq!(
+            parse_log_level_arg(&args(&["daemon", "--log-level", "error"])),
+            log::Level::Error,
+        );
+    }
+
+    #[test]
+    fn log_level_trace() {
+        assert_eq!(
+            parse_log_level_arg(&args(&["daemon", "--log-level", "trace"])),
+            log::Level::Trace,
+        );
+    }
+
+    #[test]
+    fn log_level_unknown_falls_back_to_info() {
+        assert_eq!(
+            parse_log_level_arg(&args(&["daemon", "--log-level", "verbose"])),
+            log::Level::Info,
+        );
+    }
+
+    #[test]
+    fn log_level_missing_value_falls_back_to_info() {
+        assert_eq!(
+            parse_log_level_arg(&args(&["daemon", "--log-level"])),
+            log::Level::Info,
+        );
+    }
+
+    // ── parse_profile_arg ───────────────────────────────────────────────
+
+    #[test]
+    fn profile_default_is_balanced() {
+        assert_eq!(parse_profile_arg(&args(&["daemon"])), Profile::Balanced);
+    }
+
+    #[test]
+    fn profile_quiet() {
+        assert_eq!(
+            parse_profile_arg(&args(&["daemon", "--profile", "quiet"])),
+            Profile::Quiet,
+        );
+    }
+
+    #[test]
+    fn profile_performance() {
+        assert_eq!(
+            parse_profile_arg(&args(&["daemon", "--profile", "performance"])),
+            Profile::Performance,
+        );
+    }
+
+    #[test]
+    fn profile_manual() {
+        assert_eq!(
+            parse_profile_arg(&args(&["daemon", "--profile", "manual"])),
+            Profile::Manual,
+        );
+    }
+
+    #[test]
+    fn profile_unknown_falls_back_to_balanced() {
+        assert_eq!(
+            parse_profile_arg(&args(&["daemon", "--profile", "turbo"])),
+            Profile::Balanced,
+        );
+    }
+
+    // ── parse_lhm_config ────────────────────────────────────────────────
+
+    #[test]
+    fn lhm_config_defaults() {
+        let config = parse_lhm_config(&args(&["daemon"]));
+        assert_eq!(config.url, "http://localhost:8085");
+        assert!(config.username.is_none());
+        assert!(config.password.is_none());
+    }
+
+    #[test]
+    fn lhm_config_custom_url() {
+        let config = parse_lhm_config(&args(&[
+            "daemon",
+            "--lhm-url",
+            "http://192.168.1.10:9090",
+        ]));
+        assert_eq!(config.url, "http://192.168.1.10:9090");
+    }
+
+    #[test]
+    fn lhm_config_with_auth() {
+        let config = parse_lhm_config(&args(&[
+            "daemon",
+            "--lhm-user",
+            "admin",
+            "--lhm-password",
+            "secret",
+        ]));
+        assert_eq!(config.username.as_deref(), Some("admin"));
+        assert_eq!(config.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn lhm_config_all_options() {
+        let config = parse_lhm_config(&args(&[
+            "daemon",
+            "--lhm-url",
+            "http://myhost:8080",
+            "--lhm-user",
+            "user1",
+            "--lhm-password",
+            "pass1",
+        ]));
+        assert_eq!(config.url, "http://myhost:8080");
+        assert_eq!(config.username.as_deref(), Some("user1"));
+        assert_eq!(config.password.as_deref(), Some("pass1"));
+    }
 }

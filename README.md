@@ -352,6 +352,54 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 
 ---
 
+## Troubleshooting
+
+### Daemon says "Cannot reach LibreHardwareMonitor web server"
+
+1. Verify LHM is running — look for `LibreHardwareMonitor.exe` in Task Manager.
+2. Ensure the HTTP server is enabled: **Options → HTTP Server** (port 8085).
+3. Test manually: open `http://localhost:8085/data.json` in a browser.
+4. If using a non-default port or remote host, pass `--lhm-url` to the daemon.
+
+### CPU temperature shows "n/a"
+
+- **AMD Ryzen:** LHM may need the
+  [PawnIO driver](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/wiki/PawnIO)
+  to access CPU temperature registers.
+- **Intel:** ensure LHM lists CPU temperature sensors in its main window.
+- Run the daemon with `--log-level debug` and look for `LHM CPU sensor:` lines
+  in the output (console mode) or Event Viewer (service mode).
+
+### GPU temperature shows "n/a"
+
+- Confirm LHM shows GPU temperature sensors.
+- For NVIDIA GPUs, ensure `nvidia-smi` is on the PATH and working:
+  `nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits`
+- The daemon uses both LHM and nvidia-smi; if either reports a value it will
+  be used.
+
+### No logs visible in Event Viewer (service mode)
+
+- Open **Event Viewer → Windows Logs → Application**.
+- Filter by source: **thelio-io2**.
+- If no entries appear, try restarting the service:
+  `sc.exe stop thelio-io2 && sc.exe start thelio-io2`
+
+### Device shows "not connected"
+
+- Verify the Thelio Io 2 is listed in Device Manager under
+  **Human Interface Devices** (vendor `3384`, product `000B`).
+- Try unplugging and re-plugging the internal USB header cable.
+- The daemon retries every 5 seconds automatically.
+
+### Client says "Cannot open pipe — is the daemon running?"
+
+- Verify the service is running: `sc.exe query thelio-io2`
+- In console mode, ensure only one instance is running (only one process
+  can own the named pipe).
+
+---
+
 ## Mapping from Linux Driver to Windows Daemon
 
 | Linux concept | Windows daemon equivalent |

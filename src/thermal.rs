@@ -398,3 +398,266 @@ pub fn try_init(config: &LhmConfig) -> Option<ThermalReader> {
         }
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_raw_value ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_raw_value_plain_integer() {
+        assert_eq!(parse_raw_value("65"), Some(65.0));
+    }
+
+    #[test]
+    fn parse_raw_value_plain_float() {
+        assert_eq!(parse_raw_value("46.9"), Some(46.9));
+    }
+
+    #[test]
+    fn parse_raw_value_with_celsius_suffix() {
+        // LHM sends values like "46.9 °C"
+        assert_eq!(parse_raw_value("46.9 °C"), Some(46.9));
+    }
+
+    #[test]
+    fn parse_raw_value_with_rpm_suffix() {
+        assert_eq!(parse_raw_value("1200 RPM"), Some(1200.0));
+    }
+
+    #[test]
+    fn parse_raw_value_with_leading_whitespace() {
+        assert_eq!(parse_raw_value("  72.3 °C  "), Some(72.3));
+    }
+
+    #[test]
+    fn parse_raw_value_negative() {
+        assert_eq!(parse_raw_value("-5.0"), Some(-5.0));
+    }
+
+    #[test]
+    fn parse_raw_value_empty_string() {
+        assert_eq!(parse_raw_value(""), None);
+    }
+
+    #[test]
+    fn parse_raw_value_non_numeric() {
+        assert_eq!(parse_raw_value("abc"), None);
+    }
+
+    #[test]
+    fn parse_raw_value_zero() {
+        assert_eq!(parse_raw_value("0"), Some(0.0));
+    }
+
+    // ── is_sane_celsius ──────────────────────────────────────────────────
+
+    #[test]
+    fn sane_celsius_normal_range() {
+        assert!(is_sane_celsius(25.0));
+        assert!(is_sane_celsius(65.5));
+        assert!(is_sane_celsius(100.0));
+    }
+
+    #[test]
+    fn sane_celsius_boundary_low() {
+        // 0.0 is rejected (> 0.0 required)
+        assert!(!is_sane_celsius(0.0));
+        assert!(is_sane_celsius(0.1));
+    }
+
+    #[test]
+    fn sane_celsius_boundary_high() {
+        // 150.0 is rejected (< 150.0 required)
+        assert!(!is_sane_celsius(150.0));
+        assert!(is_sane_celsius(149.9));
+    }
+
+    #[test]
+    fn sane_celsius_negative() {
+        assert!(!is_sane_celsius(-10.0));
+    }
+
+    #[test]
+    fn sane_celsius_extreme() {
+        assert!(!is_sane_celsius(999.0));
+        assert!(!is_sane_celsius(f64::NAN));
+    }
+
+    // ── fold_max ────────────────────────────────────────────────────────
+
+    #[test]
+    fn fold_max_empty() {
+        let result = fold_max(std::iter::empty());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn fold_max_single() {
+        let result = fold_max(std::iter::once(42.0));
+        assert_eq!(result, Some(42.0));
+    }
+
+    #[test]
+    fn fold_max_multiple() {
+        let result = fold_max(vec![10.0, 50.0, 30.0].into_iter());
+        assert_eq!(result, Some(50.0));
+    }
+
+    #[test]
+    fn fold_max_all_equal() {
+        let result = fold_max(vec![25.0, 25.0, 25.0].into_iter());
+        assert_eq!(result, Some(25.0));
+    }
+
+    #[test]
+    fn fold_max_with_negatives() {
+        let result = fold_max(vec![-5.0, -1.0, -10.0].into_iter());
+        assert_eq!(result, Some(-1.0));
+    }
+
+    // ── collect_temp_sensors ────────────────────────────────────────────
+
+    #[test]
+    fn collect_temp_sensors_leaf_node() {
+        let node = LhmNode {
+            children: vec![],
+            sensor_id: Some("/amdcpu/0/temperature/0".into()),
+            sensor_type: Some("Temperature".into()),
+            raw_value: Some("65.5 °C".into()),
+            text: "CPU Package".into(),
+        };
+        let mut sensors = Vec::new();
+        collect_temp_sensors(&node, &mut sensors);
+
+        assert_eq!(sensors.len(), 1);
+        assert_eq!(sensors[0].id, "/amdcpu/0/temperature/0");
+        assert_eq!(sensors[0].name, "CPU Package");
+        assert!((sensors[0].temp_c - 65.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn collect_temp_sensors_nested_tree() {
+        let node = LhmNode {
+            children: vec![
+                LhmNode {
+                    children: vec![
+                        LhmNode {
+                            children: vec![],
+                            sensor_id: Some("/amdcpu/0/temperature/0".into()),
+                            sensor_type: Some("Temperature".into()),
+                            raw_value: Some("70.0".into()),
+                            text: "CPU Core".into(),
+                        },
+                        LhmNode {
+                            children: vec![],
+                            sensor_id: Some("/amdcpu/0/load/0".into()),
+                            sensor_type: Some("Load".into()),
+                            raw_value: Some("50.0".into()),
+                            text: "CPU Total".into(),
+                        },
+                    ],
+                    sensor_id: None,
+                    sensor_type: None,
+                    raw_value: None,
+                    text: "AMD Ryzen".into(),
+                },
+                LhmNode {
+                    children: vec![LhmNode {
+                        children: vec![],
+                        sensor_id: Some("/gpu-nvidia/0/temperature/0".into()),
+                        sensor_type: Some("Temperature".into()),
+                        raw_value: Some("55.0 °C".into()),
+                        text: "GPU Core".into(),
+                    }],
+                    sensor_id: None,
+                    sensor_type: None,
+                    raw_value: None,
+                    text: "NVIDIA RTX".into(),
+                },
+            ],
+            sensor_id: None,
+            sensor_type: None,
+            raw_value: None,
+            text: "Computer".into(),
+        };
+
+        let mut sensors = Vec::new();
+        collect_temp_sensors(&node, &mut sensors);
+
+        // Should find 2 Temperature sensors (not the Load sensor)
+        assert_eq!(sensors.len(), 2);
+        assert_eq!(sensors[0].name, "CPU Core");
+        assert_eq!(sensors[1].name, "GPU Core");
+    }
+
+    #[test]
+    fn collect_temp_sensors_rejects_insane_temp() {
+        let node = LhmNode {
+            children: vec![],
+            sensor_id: Some("/cpu/0/temperature/0".into()),
+            sensor_type: Some("Temperature".into()),
+            raw_value: Some("0.0 °C".into()), // rejected: not > 0
+            text: "Dead Sensor".into(),
+        };
+        let mut sensors = Vec::new();
+        collect_temp_sensors(&node, &mut sensors);
+
+        assert!(sensors.is_empty());
+    }
+
+    #[test]
+    fn collect_temp_sensors_skips_non_temperature_type() {
+        let node = LhmNode {
+            children: vec![],
+            sensor_id: Some("/cpu/0/fan/0".into()),
+            sensor_type: Some("Fan".into()),
+            raw_value: Some("1200 RPM".into()),
+            text: "CPU Fan".into(),
+        };
+        let mut sensors = Vec::new();
+        collect_temp_sensors(&node, &mut sensors);
+
+        assert!(sensors.is_empty());
+    }
+
+    #[test]
+    fn collect_temp_sensors_empty_tree() {
+        let node = LhmNode {
+            children: vec![],
+            sensor_id: None,
+            sensor_type: None,
+            raw_value: None,
+            text: "Root".into(),
+        };
+        let mut sensors = Vec::new();
+        collect_temp_sensors(&node, &mut sensors);
+
+        assert!(sensors.is_empty());
+    }
+
+    // ── ThermalReading::summary ─────────────────────────────────────────
+
+    #[test]
+    fn thermal_reading_summary_both() {
+        let r = ThermalReading {
+            cpu_c: Some(65.0),
+            gpu_c: Some(55.0),
+            max_c: 65.0,
+        };
+        assert_eq!(r.summary(), "CPU=65.0°C GPU=55.0°C max=65.0°C");
+    }
+
+    #[test]
+    fn thermal_reading_summary_cpu_only() {
+        let r = ThermalReading {
+            cpu_c: Some(70.0),
+            gpu_c: None,
+            max_c: 70.0,
+        };
+        assert_eq!(r.summary(), "CPU=70.0°C GPU=n/a max=70.0°C");
+    }
+}

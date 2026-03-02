@@ -111,9 +111,14 @@ pub fn init(level: Level) {
                 log::set_max_level(level.to_level_filter());
             }
         }
-        Err(_) => {
+        Err(e) => {
             // Fall back to simple_logger if we cannot open the event source.
-            // This shouldn't happen in practice, but avoids silent failures.
+            // Log a warning to stderr so the failure is not completely silent.
+            eprintln!(
+                "Warning: could not open Windows Event Log source '{}': {e}; \
+                 falling back to simple_logger",
+                SOURCE_NAME
+            );
             simple_logger::init_with_level(level).unwrap_or_default();
         }
     }
