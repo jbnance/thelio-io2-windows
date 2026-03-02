@@ -64,8 +64,8 @@ struct LhmNode {
     #[serde(rename = "Type")]
     sensor_type: Option<String>,
 
-    /// Raw numeric value as a string, e.g. `"65.5"`.
-    /// Only present on sensor nodes.
+    /// Raw value as a string.  May be a plain number (`"65.5"`) or include
+    /// a unit suffix (`"46.9 °C"`, `"1200 RPM"`).  Only present on sensor nodes.
     #[serde(rename = "RawValue")]
     raw_value: Option<String>,
 
@@ -145,6 +145,20 @@ fn fold_max(iter: impl Iterator<Item = f64>) -> Option<f64> {
     iter.fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))))
 }
 
+/// Extract the leading numeric portion from a value string.
+///
+/// LHM's `RawValue` field may be a plain number (`"65.5"`) or may include
+/// a unit suffix (`"46.9 °C"`, `"1200 RPM"`).  This function strips any
+/// trailing non-numeric characters and parses the number.
+fn parse_raw_value(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim();
+    // Find the end of the numeric portion: optional leading minus, digits, optional decimal.
+    let end = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+        .unwrap_or(trimmed.len());
+    trimmed[..end].parse::<f64>().ok()
+}
+
 /// Recursively walk the LHM node tree and collect all temperature sensors.
 fn collect_temp_sensors(node: &LhmNode, out: &mut Vec<TempSensor>) {
     // Check if this node is a temperature sensor.
@@ -152,7 +166,7 @@ fn collect_temp_sensors(node: &LhmNode, out: &mut Vec<TempSensor>) {
         (&node.sensor_id, &node.sensor_type, &node.raw_value)
     {
         if typ == "Temperature" {
-            if let Ok(temp) = raw.parse::<f64>() {
+            if let Some(temp) = parse_raw_value(raw) {
                 if is_sane_celsius(temp) {
                     out.push(TempSensor {
                         id: id.clone(),
