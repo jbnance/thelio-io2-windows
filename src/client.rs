@@ -55,6 +55,19 @@ enum DeviceError {
     Timeout,
 }
 
+impl std::fmt::Display for DeviceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceError::NotConnected => write!(f, "device not connected"),
+            DeviceError::InvalidChannel(ch) => write!(f, "channel {ch} does not exist"),
+            DeviceError::InvalidPwm(v) => write!(f, "PWM value {v} out of range (0–255)"),
+            DeviceError::Comm(msg) => write!(f, "{msg}"),
+            DeviceError::DeviceError => write!(f, "device returned an error response"),
+            DeviceError::Timeout => write!(f, "operation timed out"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 enum IpcResponse {
     State(DeviceState),
@@ -164,7 +177,7 @@ fn cmd_status() -> Result<()> {
                 );
             }
         }
-        IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
+        IpcResponse::Error(e) => bail!("Daemon error: {e}"),
         other => bail!("Unexpected response: {other:?}"),
     }
     Ok(())
@@ -179,7 +192,7 @@ fn cmd_set_pwm(channel: usize, pwm: u8) -> Result<()> {
             );
             println!("Note: profile switched to manual mode.");
         }
-        IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
+        IpcResponse::Error(e) => bail!("Daemon error: {e}"),
         other => bail!("Unexpected response: {other:?}"),
     }
     Ok(())
@@ -195,7 +208,7 @@ fn cmd_profile() -> Result<()> {
             print_temps(cpu_temp_c, gpu_temp_c, temp_c,
                         cpu_max_today_c, gpu_max_today_c, max_today_c);
         }
-        IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
+        IpcResponse::Error(e) => bail!("Daemon error: {e}"),
         other => bail!("Unexpected response: {other:?}"),
     }
     Ok(())
@@ -213,7 +226,7 @@ fn cmd_set_profile(name: &str) -> Result<()> {
             print_temps(cpu_temp_c, gpu_temp_c, temp_c,
                         cpu_max_today_c, gpu_max_today_c, max_today_c);
         }
-        IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
+        IpcResponse::Error(e) => bail!("Daemon error: {e}"),
         other => bail!("Unexpected response: {other:?}"),
     }
     Ok(())

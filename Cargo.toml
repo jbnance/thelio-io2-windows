@@ -2,6 +2,7 @@
 name = "thelio-io2-windows"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 description = "Windows daemon for the System76 Thelio Io 2 fan control board"
 license = "GPL-2.0"
 
