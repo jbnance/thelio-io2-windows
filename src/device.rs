@@ -74,6 +74,10 @@ pub enum IpcResponse {
         cpu_temp_c: Option<f64>,
         gpu_temp_c: Option<f64>,
         temp_c: Option<f64>,
+        /// Daily maximum temperatures (reset at local midnight).
+        cpu_max_today_c: Option<f64>,
+        gpu_max_today_c: Option<f64>,
+        max_today_c: Option<f64>,
     },
 }
 
