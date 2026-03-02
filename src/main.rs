@@ -30,6 +30,7 @@
 //   └────────────┘ └─────────┘ └────────────────┘
 
 mod device;
+mod eventlog;
 mod fan_curve;
 mod ipc;
 mod power;
@@ -99,9 +100,16 @@ static LHM_CONFIG: OnceLock<LhmConfig> = OnceLock::new();
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    // Parse --log-level before initializing the logger.
+    // Determine mode and log level before initializing the logger.
     let log_level = parse_log_level_arg(&args);
-    simple_logger::init_with_level(log_level).unwrap_or_default();
+    let console_mode = args.iter().any(|a| a == "--console");
+
+    // Use stdout logger in console mode, Windows Event Log in service mode.
+    if console_mode {
+        simple_logger::init_with_level(log_level).unwrap_or_default();
+    } else {
+        eventlog::init(log_level);
+    }
 
     // Parse --profile argument (applies to both console and service mode).
     let profile = parse_profile_arg(&args);
@@ -113,7 +121,7 @@ fn main() -> Result<()> {
     info!("LHM URL: {}", lhm_config.url);
     LHM_CONFIG.set(lhm_config).ok();
 
-    if args.iter().any(|a| a == "--console") {
+    if console_mode {
         info!("Running in console mode (--console)");
         return run_console(profile);
     }

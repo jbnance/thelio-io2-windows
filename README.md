@@ -259,6 +259,10 @@ When installed as a Windows service the daemon starts automatically.  The
 `--profile` and `--log-level` flags can be passed via the service `binPath`
 (see Installation).
 
+**Logging:** In service mode, logs are written to the **Windows Event Log**
+instead of stdout.  To view them, open **Event Viewer → Windows Logs →
+Application** and filter by source **thelio-io2**.
+
 ---
 
 ## Usage — CLI Client
