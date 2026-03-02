@@ -375,6 +375,12 @@ fn device_loop(
     let mut last_lhm_retry = Instant::now();
     let mut consecutive_http_failures: u32 = 0;
 
+    // ── Daily max temperature tracking ──────────────────────────────────
+    let mut daily_max_cpu_c: Option<f64> = None;
+    let mut daily_max_gpu_c: Option<f64> = None;
+    let mut daily_max_c: Option<f64> = None;
+    let mut current_day_key = local_day_key();
+
     if thermal_reader.is_none() && !matches!(current_profile, Profile::Manual) {
         warn!(
             "No thermal reader available; switching profile to manual. \
@@ -449,6 +455,9 @@ fn device_loop(
                         &mut desired_profile,
                         &last_reading,
                         &thermal_reader,
+                        daily_max_cpu_c,
+                        daily_max_gpu_c,
+                        daily_max_c,
                     );
                     let _ = req.reply.send(response);
                 }
@@ -527,6 +536,35 @@ fn device_loop(
                                     current_profile,
                                 );
                             }
+
+                            // ── Daily max update ──────────────────
+                            let now_day = local_day_key();
+                            if now_day != current_day_key {
+                                info!(
+                                    "Midnight rollover — resetting daily max temps (was {})",
+                                    daily_max_c
+                                        .map_or("n/a".into(), |t| format!("{t:.1}°C")),
+                                );
+                                daily_max_cpu_c = None;
+                                daily_max_gpu_c = None;
+                                daily_max_c = None;
+                                current_day_key = now_day;
+                            }
+                            if let Some(cpu) = reading.cpu_c {
+                                daily_max_cpu_c = Some(
+                                    daily_max_cpu_c.map_or(cpu, |prev: f64| prev.max(cpu)),
+                                );
+                            }
+                            if let Some(gpu) = reading.gpu_c {
+                                daily_max_gpu_c = Some(
+                                    daily_max_gpu_c.map_or(gpu, |prev: f64| prev.max(gpu)),
+                                );
+                            }
+                            daily_max_c = Some(
+                                daily_max_c.map_or(reading.max_c, |prev: f64| {
+                                    prev.max(reading.max_c)
+                                }),
+                            );
 
                             last_reading = Some(reading);
 
@@ -610,6 +648,9 @@ fn handle_request(
     desired_profile: &mut Profile,
     last_reading: &Option<ThermalReading>,
     thermal_reader: &Option<ThermalReader>,
+    daily_max_cpu_c: Option<f64>,
+    daily_max_gpu_c: Option<f64>,
+    daily_max_c: Option<f64>,
 ) -> IpcResponse {
     match cmd {
         DeviceCommand::ReadState => match device {
@@ -684,6 +725,9 @@ fn handle_request(
                         cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
                         gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
                         temp_c: last_reading.as_ref().map(|r| r.max_c),
+                        cpu_max_today_c: daily_max_cpu_c,
+                        gpu_max_today_c: daily_max_gpu_c,
+                        max_today_c: daily_max_c,
                     }
                 }
                 None => IpcResponse::Error(DeviceError::Comm(format!(
@@ -697,6 +741,9 @@ fn handle_request(
             cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
             gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
             temp_c: last_reading.as_ref().map(|r| r.max_c),
+            cpu_max_today_c: daily_max_cpu_c,
+            gpu_max_today_c: daily_max_gpu_c,
+            max_today_c: daily_max_c,
         },
     }
 }
@@ -713,4 +760,12 @@ fn try_open_device() -> Option<Box<dyn Device>> {
             None
         }
     }
+}
+
+/// Return `(year, month, day)` from the local system clock.
+/// Used to detect midnight rollover for daily-max temperature reset.
+fn local_day_key() -> (u16, u16, u16) {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let st = unsafe { GetLocalTime() };
+    (st.wYear, st.wMonth, st.wDay)
 }
