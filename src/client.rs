@@ -65,6 +65,12 @@ enum IpcResponse {
         cpu_temp_c: Option<f64>,
         gpu_temp_c: Option<f64>,
         temp_c: Option<f64>,
+        #[serde(default)]
+        cpu_max_today_c: Option<f64>,
+        #[serde(default)]
+        gpu_max_today_c: Option<f64>,
+        #[serde(default)]
+        max_today_c: Option<f64>,
     },
 }
 
@@ -102,11 +108,25 @@ fn format_temp(label: &str, temp: Option<f64>) -> String {
     }
 }
 
-fn print_temps(cpu_temp_c: Option<f64>, gpu_temp_c: Option<f64>, temp_c: Option<f64>) {
+fn print_temps(
+    cpu_temp_c: Option<f64>,
+    gpu_temp_c: Option<f64>,
+    temp_c: Option<f64>,
+    cpu_max_today_c: Option<f64>,
+    gpu_max_today_c: Option<f64>,
+    max_today_c: Option<f64>,
+) {
     let cpu = format_temp("CPU", cpu_temp_c);
     let gpu = format_temp("GPU", gpu_temp_c);
     let max = format_temp("Max", temp_c);
     println!("  {cpu}  |  {gpu}  |  {max}");
+
+    if cpu_max_today_c.is_some() || gpu_max_today_c.is_some() || max_today_c.is_some() {
+        let dcpu = format_temp("CPU", cpu_max_today_c);
+        let dgpu = format_temp("GPU", gpu_max_today_c);
+        let dmax = format_temp("Max", max_today_c);
+        println!("  {dcpu}  |  {dgpu}  |  {dmax}  (today's peak)");
+    }
 }
 
 // ── Command handlers ────────────────────────────────────────────────────
@@ -114,9 +134,13 @@ fn print_temps(cpu_temp_c: Option<f64>, gpu_temp_c: Option<f64>, temp_c: Option<
 fn cmd_status() -> Result<()> {
     // Fetch profile + temperature first.
     match send_command(&DeviceCommand::GetProfile)? {
-        IpcResponse::ProfileInfo { profile, cpu_temp_c, gpu_temp_c, temp_c } => {
+        IpcResponse::ProfileInfo {
+            profile, cpu_temp_c, gpu_temp_c, temp_c,
+            cpu_max_today_c, gpu_max_today_c, max_today_c,
+        } => {
             println!("Profile: {profile}");
-            print_temps(cpu_temp_c, gpu_temp_c, temp_c);
+            print_temps(cpu_temp_c, gpu_temp_c, temp_c,
+                        cpu_max_today_c, gpu_max_today_c, max_today_c);
         }
         // Non-fatal — profile info is supplemental; continue to fan data.
         _ => {}
@@ -163,9 +187,13 @@ fn cmd_set_pwm(channel: usize, pwm: u8) -> Result<()> {
 
 fn cmd_profile() -> Result<()> {
     match send_command(&DeviceCommand::GetProfile)? {
-        IpcResponse::ProfileInfo { profile, cpu_temp_c, gpu_temp_c, temp_c } => {
+        IpcResponse::ProfileInfo {
+            profile, cpu_temp_c, gpu_temp_c, temp_c,
+            cpu_max_today_c, gpu_max_today_c, max_today_c,
+        } => {
             println!("Active profile: {profile}");
-            print_temps(cpu_temp_c, gpu_temp_c, temp_c);
+            print_temps(cpu_temp_c, gpu_temp_c, temp_c,
+                        cpu_max_today_c, gpu_max_today_c, max_today_c);
         }
         IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
         other => bail!("Unexpected response: {other:?}"),
@@ -177,9 +205,13 @@ fn cmd_set_profile(name: &str) -> Result<()> {
     match send_command(&DeviceCommand::SetProfile {
         profile: name.to_string(),
     })? {
-        IpcResponse::ProfileInfo { profile, cpu_temp_c, gpu_temp_c, temp_c } => {
+        IpcResponse::ProfileInfo {
+            profile, cpu_temp_c, gpu_temp_c, temp_c,
+            cpu_max_today_c, gpu_max_today_c, max_today_c,
+        } => {
             println!("Profile set to: {profile}");
-            print_temps(cpu_temp_c, gpu_temp_c, temp_c);
+            print_temps(cpu_temp_c, gpu_temp_c, temp_c,
+                        cpu_max_today_c, gpu_max_today_c, max_today_c);
         }
         IpcResponse::Error(e) => bail!("Daemon error: {e:?}"),
         other => bail!("Unexpected response: {other:?}"),
