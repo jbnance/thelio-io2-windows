@@ -43,7 +43,7 @@ parking_lot = "0.12"
 # Windows API bindings (power events, named pipes, etc.)
 # This sub-table must come last so the keys above are not absorbed into it.
 [dependencies.windows]
-version = "0.58"
+version = "0.62"
 features = [
     "Win32_Foundation",
     "Win32_System_Services",
