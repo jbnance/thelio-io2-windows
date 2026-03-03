@@ -57,7 +57,7 @@ pub enum DeviceError {
     #[error("communication error: {0}")]
     Comm(String),
     #[error("device returned an error response")]
-    DeviceError,
+    BadResponse,
     #[error("operation timed out")]
     Timeout,
 }

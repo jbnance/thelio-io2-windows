@@ -144,7 +144,7 @@ impl ThelioIoDevice {
 
         // Check the device-side result byte
         if self.buffer[HID_RES] != 0x00 {
-            return Err(DeviceError::DeviceError);
+            return Err(DeviceError::BadResponse);
         }
 
         Ok(self.buffer)
