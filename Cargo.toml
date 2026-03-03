@@ -23,7 +23,7 @@ windows-service = "0.8"
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Serialization for IPC
 serde = { version = "1", features = ["derive"] }
