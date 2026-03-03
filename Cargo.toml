@@ -19,7 +19,7 @@ path = "src/client.rs"
 hidapi = "2.6"
 
 # Windows service framework
-windows-service = "0.7"
+windows-service = "0.8"
 
 # Error handling
 anyhow = "1"
