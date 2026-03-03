@@ -409,14 +409,11 @@ fn device_loop(
         // ── Device reconnection ────────────────────────────────────────────
         if device.is_none() && last_reconnect.elapsed() >= RECONNECT_INTERVAL {
             last_reconnect = Instant::now();
-            match try_open_device() {
-                Some(d) => {
-                    info!("Connected to: {}", d.name());
-                    device = Some(d);
-                    // Immediately apply current fan profile on reconnect
-                    last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
-                }
-                None => {}
+            if let Some(d) = try_open_device() {
+                info!("Connected to: {}", d.name());
+                device = Some(d);
+                // Immediately apply current fan profile on reconnect
+                last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
             }
         }
 
@@ -461,9 +458,11 @@ fn device_loop(
                         &mut desired_profile,
                         &last_reading,
                         &thermal_reader,
-                        daily_max_cpu_c,
-                        daily_max_gpu_c,
-                        daily_max_c,
+                        DailyMaxTemps {
+                            cpu_c: daily_max_cpu_c,
+                            gpu_c: daily_max_gpu_c,
+                            max_c: daily_max_c,
+                        },
                     );
                     let _ = req.reply.send(response);
                 }
@@ -649,6 +648,14 @@ fn device_loop(
 
 // ── Request dispatch ───────────────────────────────────────────────────────
 
+/// Tracks the highest temperatures observed since local midnight.
+#[derive(Clone, Copy, Default)]
+struct DailyMaxTemps {
+    cpu_c: Option<f64>,
+    gpu_c: Option<f64>,
+    max_c: Option<f64>,
+}
+
 fn handle_request(
     device: &mut Option<Box<dyn Device>>,
     cmd: DeviceCommand,
@@ -656,9 +663,7 @@ fn handle_request(
     desired_profile: &mut Profile,
     last_reading: &Option<ThermalReading>,
     thermal_reader: &Option<ThermalReader>,
-    daily_max_cpu_c: Option<f64>,
-    daily_max_gpu_c: Option<f64>,
-    daily_max_c: Option<f64>,
+    daily_max: DailyMaxTemps,
 ) -> IpcResponse {
     match cmd {
         DeviceCommand::ReadState => match device {
@@ -733,9 +738,9 @@ fn handle_request(
                         cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
                         gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
                         temp_c: last_reading.as_ref().map(|r| r.max_c),
-                        cpu_max_today_c: daily_max_cpu_c,
-                        gpu_max_today_c: daily_max_gpu_c,
-                        max_today_c: daily_max_c,
+                        cpu_max_today_c: daily_max.cpu_c,
+                        gpu_max_today_c: daily_max.gpu_c,
+                        max_today_c: daily_max.max_c,
                     }
                 }
                 None => IpcResponse::Error(DeviceError::Comm(format!(
@@ -749,9 +754,9 @@ fn handle_request(
             cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
             gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
             temp_c: last_reading.as_ref().map(|r| r.max_c),
-            cpu_max_today_c: daily_max_cpu_c,
-            gpu_max_today_c: daily_max_gpu_c,
-            max_today_c: daily_max_c,
+            cpu_max_today_c: daily_max.cpu_c,
+            gpu_max_today_c: daily_max.gpu_c,
+            max_today_c: daily_max.max_c,
         },
     }
 }

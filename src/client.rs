@@ -51,7 +51,7 @@ enum DeviceError {
     InvalidChannel(usize),
     InvalidPwm(u8),
     Comm(String),
-    DeviceError,
+    BadResponse,
     Timeout,
 }
 
@@ -62,7 +62,7 @@ impl std::fmt::Display for DeviceError {
             DeviceError::InvalidChannel(ch) => write!(f, "channel {ch} does not exist"),
             DeviceError::InvalidPwm(v) => write!(f, "PWM value {v} out of range (0–255)"),
             DeviceError::Comm(msg) => write!(f, "{msg}"),
-            DeviceError::DeviceError => write!(f, "device returned an error response"),
+            DeviceError::BadResponse => write!(f, "device returned an error response"),
             DeviceError::Timeout => write!(f, "operation timed out"),
         }
     }
@@ -145,18 +145,15 @@ fn print_temps(
 // ── Command handlers ────────────────────────────────────────────────────
 
 fn cmd_status() -> Result<()> {
-    // Fetch profile + temperature first.
-    match send_command(&DeviceCommand::GetProfile)? {
-        IpcResponse::ProfileInfo {
-            profile, cpu_temp_c, gpu_temp_c, temp_c,
-            cpu_max_today_c, gpu_max_today_c, max_today_c,
-        } => {
-            println!("Profile: {profile}");
-            print_temps(cpu_temp_c, gpu_temp_c, temp_c,
-                        cpu_max_today_c, gpu_max_today_c, max_today_c);
-        }
-        // Non-fatal — profile info is supplemental; continue to fan data.
-        _ => {}
+    // Fetch profile + temperature first (non-fatal — continue to fan data).
+    if let IpcResponse::ProfileInfo {
+        profile, cpu_temp_c, gpu_temp_c, temp_c,
+        cpu_max_today_c, gpu_max_today_c, max_today_c,
+    } = send_command(&DeviceCommand::GetProfile)?
+    {
+        println!("Profile: {profile}");
+        print_temps(cpu_temp_c, gpu_temp_c, temp_c,
+                    cpu_max_today_c, gpu_max_today_c, max_today_c);
     }
 
     // Fetch fan channel data.
