@@ -96,6 +96,54 @@ This produces:
 
 ## Installation
 
+### Installing from a GitHub Release (recommended)
+
+Pre-built binaries are published on the
+[Releases](../../releases) page for every tagged version.
+
+1. Download the latest `thelio-io2-windows-v*.zip` from the
+   [Releases page](../../releases/latest).
+2. Extract the zip to a permanent location, for example:
+   ```powershell
+   Expand-Archive thelio-io2-windows-v*.zip -DestinationPath "C:\Program Files\thelio-io2"
+   ```
+3. Open an **elevated** (Run as Administrator) PowerShell and register the
+   service:
+   ```powershell
+   $bin = "C:\Program Files\thelio-io2\thelio-io2-daemon.exe"
+
+   sc.exe create thelio-io2 `
+       binPath= "`"$bin`"" `
+       DisplayName= "System76 Thelio Io2 Fan Controller" `
+       start= auto
+
+   sc.exe description thelio-io2 "Controls fan speeds on modern System76 Thelio desktops."
+
+   sc.exe start thelio-io2
+   ```
+4. Optionally, add the install directory to your `PATH` so you can run
+   `thelio-io2-client` from any terminal:
+   ```powershell
+   [Environment]::SetEnvironmentVariable(
+       "Path",
+       [Environment]::GetEnvironmentVariable("Path", "Machine") + ";C:\Program Files\thelio-io2",
+       "Machine"
+   )
+   ```
+
+#### Upgrading
+
+To upgrade to a new release:
+
+```powershell
+sc.exe stop thelio-io2
+# Extract the new zip over the existing directory
+Expand-Archive thelio-io2-windows-v*.zip -DestinationPath "C:\Program Files\thelio-io2" -Force
+sc.exe start thelio-io2
+```
+
+### Installing from source
+
 ### Register the Windows Service
 
 Run the following from an **elevated** PowerShell:
