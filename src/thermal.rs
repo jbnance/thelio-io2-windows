@@ -206,10 +206,12 @@ impl ThermalReader {
         };
 
         // Build a reusable HTTP agent with a short timeout.
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(3))
-            .timeout_read(Duration::from_secs(5))
-            .build();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(3)))
+            .timeout_recv_response(Some(Duration::from_secs(5)))
+            .timeout_recv_body(Some(Duration::from_secs(5)))
+            .build()
+            .into();
 
         Self {
             url,
@@ -222,12 +224,14 @@ impl ThermalReader {
     fn fetch_temp_sensors(&self) -> Result<Vec<TempSensor>, ThermalError> {
         let mut req = self.agent.get(&self.url);
         if let Some(ref auth) = self.auth_header {
-            req = req.set("Authorization", auth);
+            req = req.header("Authorization", auth);
         }
 
-        let resp = req.call().map_err(|e| ThermalError::Http(e.to_string()))?;
-        let body = resp
-            .into_string()
+        let body = req
+            .call()
+            .map_err(|e| ThermalError::Http(e.to_string()))?
+            .body_mut()
+            .read_to_string()
             .map_err(|e| ThermalError::Http(e.to_string()))?;
 
         let root: LhmNode = serde_json::from_str(&body)?;

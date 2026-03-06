@@ -118,7 +118,7 @@ fn listener_loop(pipe_name: &[u16], device_tx: &Sender<IpcRequest>) -> Result<()
             );
 
             if handle == INVALID_HANDLE_VALUE {
-                let err = windows::core::Error::from_win32();
+                let err = windows::core::Error::from_thread();
                 bail!("CreateNamedPipeW failed: {err}");
             }
             handle
