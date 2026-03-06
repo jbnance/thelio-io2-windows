@@ -229,9 +229,8 @@ fn run_console(profile: Profile) -> Result<()> {
     // trigger a clean shutdown through the device loop's stop channel.
     CONSOLE_STOP_TX.set(stop_tx).ok();
     unsafe {
-        use windows::Win32::Foundation::BOOL;
         use windows::Win32::System::Console::SetConsoleCtrlHandler;
-        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), BOOL(1));
+        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), true);
     }
 
     // Start the IPC server.
@@ -246,18 +245,15 @@ fn run_console(profile: Profile) -> Result<()> {
 
 /// Called by Windows on Ctrl+C, Ctrl+Break, or console window close.
 /// Runs on a separate OS thread created by the system.
-unsafe extern "system" fn console_ctrl_handler(
-    ctrl_type: u32,
-) -> windows::Win32::Foundation::BOOL {
-    use windows::Win32::Foundation::BOOL;
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows::core::BOOL {
     // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2
     if ctrl_type <= 2 {
         if let Some(tx) = CONSOLE_STOP_TX.get() {
             let _ = tx.send(());
         }
-        BOOL(1) // handled — don't terminate immediately
+        windows::core::BOOL(1) // handled — don't terminate immediately
     } else {
-        BOOL(0) // let the system handle it
+        windows::core::BOOL(0) // let the system handle it
     }
 }
 
