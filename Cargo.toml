@@ -2,7 +2,7 @@
 name = "thelio-io2-windows"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.75"
 description = "Windows daemon for the System76 Thelio Io 2 fan control board"
 license = "GPL-2.0"
 
@@ -34,7 +34,7 @@ log = "0.4"
 simple_logger = { version = "5", features = ["timestamps"] }
 
 # HTTP client for LibreHardwareMonitor web API
-ureq = "2"
+ureq = "3"
 base64 = "0.22"
 
 # Synchronization
@@ -43,7 +43,7 @@ parking_lot = "0.12"
 # Windows API bindings (power events, named pipes, etc.)
 # This sub-table must come last so the keys above are not absorbed into it.
 [dependencies.windows]
-version = "0.58"
+version = "0.62"
 features = [
     "Win32_Foundation",
     "Win32_System_Services",
