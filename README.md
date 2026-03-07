@@ -105,7 +105,7 @@ rustup target add x86_64-pc-windows-msvc
 # Build the Rust daemon and client
 cargo build --release
 
-# Build the lhm-helper sidecar (.NET 6+ SDK required)
+# Build the lhm-helper sidecar (.NET 10 SDK required)
 dotnet publish lhm-helper/lhm-helper.csproj `
     --configuration Release --runtime win-x64 `
     --self-contained true -p:PublishSingleFile=true `
@@ -169,7 +169,40 @@ sc.exe start thelio-io2
 
 ### Installing from source
 
-### Register the Windows Service
+#### Prerequisites
+
+- [Rust toolchain](https://rustup.rs/) with the `x86_64-pc-windows-msvc` target:
+  ```powershell
+  rustup target add x86_64-pc-windows-msvc
+  ```
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+
+#### Build the binaries
+
+```powershell
+# Build the Rust daemon and client
+cargo build --release
+
+# Build the lhm-helper sidecar
+dotnet publish lhm-helper/lhm-helper.csproj `
+    --configuration Release --runtime win-x64 `
+    --self-contained true -p:PublishSingleFile=true `
+    --output lhm-helper/publish
+```
+
+This produces:
+- `target\release\thelio-io2-daemon.exe` — the Windows service
+- `target\release\thelio-io2-client.exe` — the CLI client
+- `lhm-helper\publish\lhm-helper.exe` — the temperature reader sidecar
+
+Copy `lhm-helper\publish\lhm-helper.exe` next to `thelio-io2-daemon.exe` so that
+library mode can find it automatically:
+
+```powershell
+Copy-Item lhm-helper\publish\lhm-helper.exe target\release\
+```
+
+#### Register the Windows Service
 
 Run the following from an **elevated** PowerShell:
 
