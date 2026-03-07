@@ -53,7 +53,7 @@ Both use [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHar
 under the hood, which provides reliable sensor access across Intel and AMD
 processors and all major GPU vendors.
 
-#### Library mode (`--lhm-mode library`) — recommended
+#### Library mode (`--lhm-mode library`) — default
 
 Uses the bundled `lhm-helper.exe` sidecar, which wraps the
 LibreHardwareMonitorLib NuGet package directly.  **No separate LHM
@@ -64,7 +64,7 @@ archives).
 The daemon must run with **administrator privileges** (the same requirement
 as LHM itself) so the library can access hardware sensors.
 
-#### HTTP mode (`--lhm-mode http`) — default
+#### HTTP mode (`--lhm-mode http`)
 
 Connects to a running LibreHardwareMonitor instance via its built-in HTTP
 web server.  This is the legacy mode and is useful if you already have LHM
@@ -343,7 +343,7 @@ restores the user's desired profile when a source becomes available.
 | `--console` | *(none)* | — | Run as a foreground console process instead of a Windows service. |
 | `--profile` | `quiet`, `balanced`, `performance`, `manual` | `balanced` | Initial fan control profile. |
 | `--log-level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Log verbosity. Use `debug` to see per-poll temperature/PWM details. |
-| `--lhm-mode` | `http`, `library` | `http` | Temperature backend. `library` uses the bundled `lhm-helper.exe`; `http` connects to LHM's web server. |
+| `--lhm-mode` | `http`, `library` | `library` | Temperature backend. `library` uses the bundled `lhm-helper.exe`; `http` connects to LHM's web server. |
 | `--lhm-helper-path` | file path | `lhm-helper.exe` in daemon dir | Path to `lhm-helper.exe` (only used in library mode). |
 | `--lhm-url` | URL (scheme://host:port) | `http://localhost:8085` | LibreHardwareMonitor web server URL (only used in http mode). |
 | `--lhm-user` | username | *(none)* | HTTP Basic Auth username for LHM (only used in http mode). |

@@ -2,15 +2,15 @@
 //
 // Two backends are supported for reading hardware temperatures:
 //
-// 1. **HTTP** (`--lhm-mode http`, default): Connects to the
-//    LibreHardwareMonitor web server at a configurable URL.  Requires LHM
-//    to be running with its built-in HTTP server enabled.  nvidia-smi is
-//    used as a supplementary GPU temperature source.
+// 1. **Library** (`--lhm-mode library`, default): Spawns the `lhm-helper`
+//    sidecar process, which uses the LibreHardwareMonitorLib NuGet package
+//    directly.  No running LHM instance required.  GPU temps (NVIDIA, AMD,
+//    Intel) are read natively by the library.
 //
-// 2. **Library** (`--lhm-mode library`): Spawns the `lhm-helper` sidecar
-//    process, which uses the LibreHardwareMonitorLib NuGet package directly.
-//    No running LHM instance required.  GPU temps (NVIDIA, AMD, Intel) are
-//    read natively by the library.
+// 2. **HTTP** (`--lhm-mode http`): Connects to the LibreHardwareMonitor web
+//    server at a configurable URL.  Requires LHM to be running with its
+//    built-in HTTP server enabled.  nvidia-smi is used as a supplementary
+//    GPU temperature source.
 //
 // Both backends produce the same `ThermalReading` output.  The daemon polls
 // every thermal cycle (2 s) and uses the max of CPU and GPU readings for

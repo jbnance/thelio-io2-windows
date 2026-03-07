@@ -229,7 +229,7 @@ fn parse_lhm_config(args: &[String]) -> LhmConfig {
     config
 }
 
-/// Parse --lhm-mode <http|library> from args, defaulting to Http.
+/// Parse --lhm-mode <http|library> from args, defaulting to Library.
 fn parse_lhm_mode(args: &[String]) -> LhmMode {
     for (i, arg) in args.iter().enumerate() {
         if arg == "--lhm-mode" {
@@ -238,13 +238,13 @@ fn parse_lhm_mode(args: &[String]) -> LhmMode {
                     "http" => return LhmMode::Http,
                     "library" | "lib" => return LhmMode::Library,
                     _ => {
-                        eprintln!("Unknown --lhm-mode '{mode}'; using http");
+                        eprintln!("Unknown --lhm-mode '{mode}'; using library");
                     }
                 }
             }
         }
     }
-    LhmMode::Http
+    LhmMode::Library
 }
 
 /// Parse --lhm-helper-path <path> from args.
