@@ -708,6 +708,18 @@ struct DailyMaxTemps {
     max_c: Option<f64>,
 }
 
+/// Returns "library", "http", or "none" describing the active thermal backend.
+fn thermal_source_label(thermal_reader: &Option<ThermalSource>) -> String {
+    match thermal_reader {
+        None => "none".to_string(),
+        Some(_) => match LHM_MODE.get() {
+            Some(LhmMode::Library) => "library".to_string(),
+            Some(LhmMode::Http) => "http".to_string(),
+            None => "none".to_string(),
+        },
+    }
+}
+
 fn handle_request(
     device: &mut Option<Box<dyn Device>>,
     cmd: DeviceCommand,
@@ -787,6 +799,7 @@ fn handle_request(
                     *desired_profile = p;
                     IpcResponse::ProfileInfo {
                         profile: p.to_string(),
+                        thermal_source: thermal_source_label(thermal_reader),
                         cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
                         gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
                         temp_c: last_reading.as_ref().map(|r| r.max_c),
@@ -803,6 +816,7 @@ fn handle_request(
 
         DeviceCommand::GetProfile => IpcResponse::ProfileInfo {
             profile: current_profile.to_string(),
+            thermal_source: thermal_source_label(thermal_reader),
             cpu_temp_c: last_reading.as_ref().and_then(|r| r.cpu_c),
             gpu_temp_c: last_reading.as_ref().and_then(|r| r.gpu_c),
             temp_c: last_reading.as_ref().map(|r| r.max_c),
