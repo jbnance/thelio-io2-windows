@@ -13,7 +13,7 @@ on System76 Thelio desktop computers running Windows.
 
 This project is not affiliated with System76 in any way.  While System76 provides some guides and Open Source utilities related to using Windows on their hardware, they do not support Windows.
 
-The source code in this repository was almost entirely created by Antropic Claude using existing Linux-based OSS projects as baselines (see "Acknowledgments" below).
+The source code in this repository was almost entirely created by Anthropic Claude using existing Linux-based OSS projects as baselines (see "Acknowledgments" below).
 
 This code has only been tested on a single setup: System76 Thelio (thelio-r5-n1) with an AMD Ryzen 7 9800X3D and Nvidia GeForce RTX 4060 running Windows 11.
 
