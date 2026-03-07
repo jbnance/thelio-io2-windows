@@ -26,11 +26,13 @@ on System76 Thelio desktop computers running Windows.
 │                  │                                               │
 │       ┌──────────┼──────────────┐                                │
 │       │          │              │                                │
-│  ┌────▼─────┐ ┌──▼──────────┐ ┌▼───────────────┐               │
-│  │   IPC    │ │   Power     │ │ Thermal Reader  │               │
-│  │  Server  │ │   Events    │ │ (LHM HTTP +      │               │
-│  │ (thread) │ │ (SCM ctrl)  │ │  nvidia-smi)    │               │
-│  └──────────┘ └─────────────┘ └─────────────────┘               │
+│  ┌────▼─────┐ ┌──▼──────────┐ ┌▼──────────────────────┐        │
+│  │   IPC    │ │   Power     │ │  Thermal Source        │        │
+│  │  Server  │ │   Events    │ │  HTTP mode (LHM web    │        │
+│  │ (thread) │ │ (SCM ctrl)  │ │    server + nvidia-smi)│        │
+│  └──────────┘ └─────────────┘ │  or Library mode       │        │
+│                                │    (lhm-helper.exe)    │        │
+│                                └────────────────────────┘        │
 └─────────────────────────────────────────────────────────────────┘
          ▲ named pipe: \\.\pipe\thelio-io2
          │
@@ -44,13 +46,29 @@ on System76 Thelio desktop computers running Windows.
 
 ## Prerequisites
 
-### LibreHardwareMonitor (required for temperature monitoring)
+### Temperature monitoring
 
-[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
-must be installed and **running** with its built-in HTTP web server enabled
-for the daemon to read CPU and GPU temperatures.  LHM uses a kernel driver
-to read CPU die temperature, which is the only reliable method on Windows
-across both Intel and AMD processors.
+The daemon supports two modes for reading CPU and GPU temperatures.
+Both use [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
+under the hood, which provides reliable sensor access across Intel and AMD
+processors and all major GPU vendors.
+
+#### Library mode (`--lhm-mode library`) — recommended
+
+Uses the bundled `lhm-helper.exe` sidecar, which wraps the
+LibreHardwareMonitorLib NuGet package directly.  **No separate LHM
+installation or GUI is required** — just place `lhm-helper.exe` in the same
+directory as `thelio-io2-daemon.exe` (this is the default layout in release
+archives).
+
+The daemon must run with **administrator privileges** (the same requirement
+as LHM itself) so the library can access hardware sensors.
+
+#### HTTP mode (`--lhm-mode http`) — default
+
+Connects to a running LibreHardwareMonitor instance via its built-in HTTP
+web server.  This is the legacy mode and is useful if you already have LHM
+running or want to monitor sensors from a remote machine.
 
 1. Download the latest release from the
    [LibreHardwareMonitor releases page](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases).
@@ -63,11 +81,10 @@ across both Intel and AMD processors.
 
 > **Note:** For AMD Ryzen processors you may also need to install the
 > [PawnIO driver](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/wiki/PawnIO)
-> for LHM to read CPU temperatures.
+> for LHM/LibreHardwareMonitorLib to read CPU temperatures.
 
-> **Note:** Without LibreHardwareMonitor the daemon has no temperature
-> source and switches to **manual** mode — fans must be controlled
-> explicitly via the CLI client.
+> **Note:** Without a working temperature source the daemon switches to
+> **manual** mode — fans must be controlled explicitly via the CLI client.
 
 ### Thelio Io 2
 
@@ -85,12 +102,20 @@ rustup target add x86_64-pc-windows-msvc
 ## Building
 
 ```powershell
+# Build the Rust daemon and client
 cargo build --release
+
+# Build the lhm-helper sidecar (.NET 6+ SDK required)
+dotnet publish lhm-helper/lhm-helper.csproj `
+    --configuration Release --runtime win-x64 `
+    --self-contained true -p:PublishSingleFile=true `
+    --output lhm-helper/publish
 ```
 
 This produces:
 - `target\release\thelio-io2-daemon.exe` — the Windows service
 - `target\release\thelio-io2-client.exe` — the CLI client
+- `lhm-helper\publish\lhm-helper.exe` — the temperature reader sidecar
 
 ---
 
@@ -252,26 +277,27 @@ The daemon reads CPU and GPU temperatures and uses the **maximum** across
 all readings for fan curve evaluation (since the Thelio chassis fans cool
 the entire system).  Both Intel and AMD processors are supported.
 
-### CPU temperature
+### Library mode
 
-The daemon connects to LHM's built-in HTTP web server and fetches the
-`/data.json` sensor tree every 2 seconds.  CPU temperature sensors are
-identified by sensor IDs containing `/cpu`, `/intelcpu`, or `/amdcpu`.
-The maximum across all CPU temperature sensors is used.
+In library mode (`--lhm-mode library`), the bundled `lhm-helper.exe`
+sidecar accesses hardware sensors directly via LibreHardwareMonitorLib.
+CPU and GPU temperatures (NVIDIA, AMD, Intel) are all read natively by
+the library — no additional tools like `nvidia-smi` are needed.
 
-### GPU temperature
+### HTTP mode
 
-All available sources are checked and the **maximum** across every detected
-GPU is used.  This handles systems with multiple GPUs (discrete + integrated,
-or multi-GPU configurations):
+In HTTP mode (`--lhm-mode http`), the daemon connects to LHM's built-in
+HTTP web server and fetches the `/data.json` sensor tree every 2 seconds.
 
-| Source | Supported GPUs | Notes |
-|--------|---------------|-------|
-| **LibreHardwareMonitor** HTTP | NVIDIA, AMD, Intel Arc | Identifies GPUs via `/gpu` sensor ID paths. |
-| `nvidia-smi` CLI | NVIDIA | Returns one reading per GPU.  Supplements LHM; silently skipped if not installed. |
+- **CPU:** Sensors with IDs containing `/cpu`, `/intelcpu`, or `/amdcpu`.
+- **GPU:** Sensors with IDs containing `/gpu`, plus `nvidia-smi` as a
+  supplementary source (silently skipped if not installed).
+
+### Fallback behavior
 
 If no temperature source is available the daemon logs a warning and falls
-back to **manual** mode.
+back to **manual** mode.  It retries every 30 seconds and automatically
+restores the user's desired profile when a source becomes available.
 
 ---
 
@@ -284,15 +310,20 @@ back to **manual** mode.
 | `--console` | *(none)* | — | Run as a foreground console process instead of a Windows service. |
 | `--profile` | `quiet`, `balanced`, `performance`, `manual` | `balanced` | Initial fan control profile. |
 | `--log-level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Log verbosity. Use `debug` to see per-poll temperature/PWM details. |
-| `--lhm-url` | URL (scheme://host:port) | `http://localhost:8085` | LibreHardwareMonitor web server URL. |
-| `--lhm-user` | username | *(none)* | HTTP Basic Auth username for LHM (optional). |
-| `--lhm-password` | password | *(none)* | HTTP Basic Auth password for LHM (optional). |
+| `--lhm-mode` | `http`, `library` | `http` | Temperature backend. `library` uses the bundled `lhm-helper.exe`; `http` connects to LHM's web server. |
+| `--lhm-helper-path` | file path | `lhm-helper.exe` in daemon dir | Path to `lhm-helper.exe` (only used in library mode). |
+| `--lhm-url` | URL (scheme://host:port) | `http://localhost:8085` | LibreHardwareMonitor web server URL (only used in http mode). |
+| `--lhm-user` | username | *(none)* | HTTP Basic Auth username for LHM (only used in http mode). |
+| `--lhm-password` | password | *(none)* | HTTP Basic Auth password for LHM (only used in http mode). |
 
 ### Console mode (development / debugging)
 
 ```powershell
-# Run with the default balanced profile
+# Run with the default balanced profile (HTTP mode)
 thelio-io2-daemon.exe --console
+
+# Run with the library backend (no LHM GUI needed)
+thelio-io2-daemon.exe --console --lhm-mode library
 
 # Run with a specific profile
 thelio-io2-daemon.exe --console --profile performance
@@ -402,12 +433,19 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 
 ## Troubleshooting
 
-### Daemon says "Cannot reach LibreHardwareMonitor web server"
+### Daemon says "Cannot reach LibreHardwareMonitor web server" (HTTP mode)
 
 1. Verify LHM is running — look for `LibreHardwareMonitor.exe` in Task Manager.
 2. Ensure the HTTP server is enabled: **Options → HTTP Server** (port 8085).
 3. Test manually: open `http://localhost:8085/data.json` in a browser.
 4. If using a non-default port or remote host, pass `--lhm-url` to the daemon.
+5. Consider switching to `--lhm-mode library` to avoid needing the LHM GUI entirely.
+
+### Daemon says "Failed to start lhm-helper" (Library mode)
+
+1. Verify `lhm-helper.exe` exists in the same directory as `thelio-io2-daemon.exe`.
+2. Ensure the daemon is running as **administrator** (required for hardware access).
+3. If `lhm-helper.exe` is in a different location, pass `--lhm-helper-path`.
 
 ### CPU temperature shows "n/a"
 
@@ -460,7 +498,7 @@ The named pipe `\\.\pipe\thelio-io2` accepts newline-delimited JSON.
 | DKMS module autoload | Windows service `start= auto` |
 | `system76-power` profiles | `--profile` flag + `SetProfile` / `GetProfile` IPC |
 | `system76-power` fan curves | `fan_curve.rs` with system76-power-compatible curves |
-| `/sys/class/thermal/` | LibreHardwareMonitor HTTP API (+ nvidia-smi) |
+| `/sys/class/thermal/` | LibreHardwareMonitorLib (library mode) or LHM HTTP API + nvidia-smi (http mode) |
 
 ---
 
