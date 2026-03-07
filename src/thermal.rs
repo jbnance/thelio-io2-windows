@@ -1,25 +1,30 @@
-// src/thermal.rs — CPU / GPU Temperature Reading via LibreHardwareMonitor HTTP
+// src/thermal.rs — CPU / GPU Temperature Reading
 //
-// Temperature data comes from LibreHardwareMonitor (LHM), which must be
-// running with its built-in web server enabled.  LHM serves a JSON sensor
-// tree at /data.json that contains per-component temperature readings for
-// any CPU and GPU vendor (Intel, AMD, NVIDIA, Intel Arc).
+// Two backends are supported for reading hardware temperatures:
 //
-// The daemon polls LHM's HTTP endpoint every thermal cycle (2 s).  The
-// JSON response is a recursive tree of nodes; we walk it to find all
-// temperature sensors, then select the max CPU and max GPU readings.
+// 1. **Library** (`--lhm-mode library`, default): Spawns the `lhm-helper`
+//    sidecar process, which uses the LibreHardwareMonitorLib NuGet package
+//    directly.  No running LHM instance required.  GPU temps (NVIDIA, AMD,
+//    Intel) are read natively by the library.
 //
-// nvidia-smi is used as a supplementary GPU temperature source.
+// 2. **HTTP** (`--lhm-mode http`): Connects to the LibreHardwareMonitor web
+//    server at a configurable URL.  Requires LHM to be running with its
+//    built-in HTTP server enabled.  nvidia-smi is used as a supplementary
+//    GPU temperature source.
 //
-// The overall temperature used for fan control is the maximum of CPU and
-// all GPU readings, since the Thelio chassis fans cool the entire system.
+// Both backends produce the same `ThermalReading` output.  The daemon polls
+// every thermal cycle (2 s) and uses the max of CPU and GPU readings for
+// fan curve evaluation.
 
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
 use base64::Engine;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
+
+use crate::thermal_lib::{self, LibThermalReader};
 
 // ── LHM configuration ───────────────────────────────────────────────────
 
@@ -112,8 +117,8 @@ impl ThermalReading {
 
 // ── Public API ───────────────────────────────────────────────────────────
 
-/// Reads CPU and GPU temperatures from the LHM HTTP API.
-pub struct ThermalReader {
+/// Reads CPU and GPU temperatures from the LHM HTTP API (web server backend).
+pub struct HttpThermalReader {
     /// Full URL to the /data.json endpoint.
     url: String,
     /// Pre-encoded Basic Auth header value, if credentials were provided.
@@ -136,12 +141,12 @@ pub enum ThermalError {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Sanity-check a Celsius reading: reject values that are clearly wrong.
-fn is_sane_celsius(c: f64) -> bool {
+pub(crate) fn is_sane_celsius(c: f64) -> bool {
     c > 0.0 && c < 150.0
 }
 
 /// Take the maximum of an iterator of f64, returning None if empty.
-fn fold_max(iter: impl Iterator<Item = f64>) -> Option<f64> {
+pub(crate) fn fold_max(iter: impl Iterator<Item = f64>) -> Option<f64> {
     iter.fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a| a.max(v))))
 }
 
@@ -184,7 +189,7 @@ fn collect_temp_sensors(node: &LhmNode, out: &mut Vec<TempSensor>) {
     }
 }
 
-impl ThermalReader {
+impl HttpThermalReader {
     /// Create a new thermal reader that connects to the LHM web server.
     pub fn new(config: &LhmConfig) -> Self {
         // Build the full /data.json URL.
@@ -353,12 +358,12 @@ impl ThermalReader {
     }
 }
 
-/// Try to create a ThermalReader and perform a test read.
+/// Try to create a HttpThermalReader and perform a test read.
 ///
 /// Returns `None` (with warnings logged) if LHM is not reachable or
 /// returns no temperature data.  The daemon will fall back to manual mode.
-pub fn try_init(config: &LhmConfig) -> Option<ThermalReader> {
-    let reader = ThermalReader::new(config);
+pub fn try_init(config: &LhmConfig) -> Option<HttpThermalReader> {
+    let reader = HttpThermalReader::new(config);
 
     info!("Connecting to LibreHardwareMonitor at {}", reader.url);
     if reader.auth_header.is_some() {
@@ -400,6 +405,48 @@ pub fn try_init(config: &LhmConfig) -> Option<ThermalReader> {
             warn!("Automatic fan control will be unavailable");
             None
         }
+    }
+}
+
+// ── ThermalSource — unified backend dispatch ─────────────────────────────
+
+/// Which backend to use for reading temperatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LhmMode {
+    /// Connect to a running LHM web server via HTTP.
+    Http,
+    /// Use the lhm-helper sidecar (LibreHardwareMonitorLib).
+    Library,
+}
+
+/// Unified temperature source wrapping either backend.
+pub enum ThermalSource {
+    Http(HttpThermalReader),
+    Library(LibThermalReader),
+}
+
+impl ThermalSource {
+    /// Read current temperatures, delegating to the active backend.
+    pub fn read_temps(&mut self) -> Result<ThermalReading, ThermalError> {
+        match self {
+            Self::Http(r) => r.read_temps(),
+            Self::Library(r) => r.read_temps(),
+        }
+    }
+}
+
+/// Initialize a `ThermalSource` using the specified backend mode.
+///
+/// Returns `None` (with warnings logged) if the backend cannot be started
+/// or returns no temperature data.
+pub fn try_init_source(
+    mode: LhmMode,
+    config: &LhmConfig,
+    helper_path: &Path,
+) -> Option<ThermalSource> {
+    match mode {
+        LhmMode::Http => try_init(config).map(ThermalSource::Http),
+        LhmMode::Library => thermal_lib::try_init_lib(helper_path).map(ThermalSource::Library),
     }
 }
 

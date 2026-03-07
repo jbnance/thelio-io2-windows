@@ -23,11 +23,25 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "6.0.x"
+
       - name: Run tests
         run: cargo test --verbose
 
-      - name: Build release binaries
+      - name: Build release binaries (Rust)
         run: cargo build --release --verbose
+
+      - name: Build lhm-helper (.NET self-contained)
+        run: >
+          dotnet publish lhm-helper/lhm-helper.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          --output lhm-helper/publish
 
       - name: Determine version from tag
         id: version
@@ -43,6 +57,7 @@ jobs:
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target\release\thelio-io2-daemon.exe" $staging
           Copy-Item "target\release\thelio-io2-client.exe" $staging
+          Copy-Item "lhm-helper\publish\lhm-helper.exe" $staging
           Copy-Item "README.md" $staging
 
           if (Test-Path "LICENSE") {

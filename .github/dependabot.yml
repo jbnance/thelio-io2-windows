@@ -8,6 +8,12 @@ updates:
     schedule:
       interval: "weekly"
 
+  # Keep lhm-helper NuGet dependencies up to date
+  - package-ecosystem: "nuget"
+    directory: "/lhm-helper"
+    schedule:
+      interval: "weekly"
+
   # Keep GitHub Actions versions up to date
   - package-ecosystem: "github-actions"
     directory: "/"

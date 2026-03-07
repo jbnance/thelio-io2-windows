@@ -75,6 +75,8 @@ enum IpcResponse {
     Error(DeviceError),
     ProfileInfo {
         profile: String,
+        #[serde(default)]
+        thermal_source: String,
         cpu_temp_c: Option<f64>,
         gpu_temp_c: Option<f64>,
         temp_c: Option<f64>,
@@ -147,11 +149,17 @@ fn print_temps(
 fn cmd_status() -> Result<()> {
     // Fetch profile + temperature first (non-fatal — continue to fan data).
     if let IpcResponse::ProfileInfo {
-        profile, cpu_temp_c, gpu_temp_c, temp_c,
+        profile, thermal_source, cpu_temp_c, gpu_temp_c, temp_c,
         cpu_max_today_c, gpu_max_today_c, max_today_c,
     } = send_command(&DeviceCommand::GetProfile)?
     {
         println!("Profile: {profile}");
+        let source_label = match thermal_source.as_str() {
+            "library" => "LHM library",
+            "http"    => "LHM http",
+            _         => "none",
+        };
+        println!("Temp source: {source_label}");
         print_temps(cpu_temp_c, gpu_temp_c, temp_c,
                     cpu_max_today_c, gpu_max_today_c, max_today_c);
     }
@@ -198,7 +206,7 @@ fn cmd_set_pwm(channel: usize, pwm: u8) -> Result<()> {
 fn cmd_profile() -> Result<()> {
     match send_command(&DeviceCommand::GetProfile)? {
         IpcResponse::ProfileInfo {
-            profile, cpu_temp_c, gpu_temp_c, temp_c,
+            profile, thermal_source: _, cpu_temp_c, gpu_temp_c, temp_c,
             cpu_max_today_c, gpu_max_today_c, max_today_c,
         } => {
             println!("Active profile: {profile}");
@@ -216,7 +224,7 @@ fn cmd_set_profile(name: &str) -> Result<()> {
         profile: name.to_string(),
     })? {
         IpcResponse::ProfileInfo {
-            profile, cpu_temp_c, gpu_temp_c, temp_c,
+            profile, thermal_source: _, cpu_temp_c, gpu_temp_c, temp_c,
             cpu_max_today_c, gpu_max_today_c, max_today_c,
         } => {
             println!("Profile set to: {profile}");

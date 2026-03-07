@@ -20,5 +20,10 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# .NET build output (lhm-helper)
+lhm-helper/bin/
+lhm-helper/obj/
+lhm-helper/publish/
+
 # Claude Code
 .claude/

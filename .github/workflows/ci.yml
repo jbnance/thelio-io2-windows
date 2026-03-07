@@ -36,7 +36,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "6.0.x"
+
+      - name: Build lhm-helper (.NET)
+        run: dotnet build lhm-helper/lhm-helper.csproj --configuration Release
+
+      - name: Build (Rust)
         run: cargo build --verbose
 
       - name: Run tests
