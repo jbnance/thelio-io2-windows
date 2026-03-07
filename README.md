@@ -9,31 +9,45 @@ on System76 Thelio desktop computers running Windows.
 
 ---
 
+## Disclaimer
+
+This project is not affiliated with System76 in any way.  While System76 provides some guides and Open Source utilities related to using Windows on their hardware, they do not support Windows.
+
+The source code in this repository was almost entirely created by Antropic Claude using existing Linux-based OSS projects as baselines (see "Acknowledgments" below).
+
+This code has only been tested on a single setup: System76 Thelio (thelio-r5-n1) with an AMD Ryzen 7 9800X3D and Nvidia GeForce RTX 4060 running Windows 11.
+
+**Overheating a computer can permanently damage or destroy it.**
+
+Use at your own discretion.
+
+---
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────┐
 │                  Windows Service (thelio-io2)                    │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────────┐  │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
 │  │                 Device Loop (main thread)                  │  │
 │  │  - Auto-detects & opens the Thelio Io 2                    │  │
 │  │  - Handles IPC requests from named pipe clients            │  │
 │  │  - Handles suspend/resume power events                     │  │
 │  │  - Polls temperature & applies fan curves every 2 seconds  │  │
 │  │  - Auto-reconnects if the device is unplugged              │  │
-│  └──────────────┬────────────────────────────────────────────┘  │
+│  └───────────────┬────────────────────────────────────────────┘  │
 │                  │                                               │
-│       ┌──────────┼──────────────┐                                │
-│       │          │              │                                │
-│  ┌────▼─────┐ ┌──▼──────────┐ ┌▼──────────────────────┐        │
-│  │   IPC    │ │   Power     │ │  Thermal Source        │        │
-│  │  Server  │ │   Events    │ │  HTTP mode (LHM web    │        │
-│  │ (thread) │ │ (SCM ctrl)  │ │    server + nvidia-smi)│        │
-│  └──────────┘ └─────────────┘ │  or Library mode       │        │
-│                                │    (lhm-helper.exe)    │        │
-│                                └────────────────────────┘        │
-└─────────────────────────────────────────────────────────────────┘
+│       ┌──────────┼─────────────┐                                 │
+│       │          │             │                                 │
+│  ┌────▼─────┐ ┌──▼──────────┐ ┌▼─────────────────────────┐       │
+│  │   IPC    │ │   Power     │ │  Thermal Source          │       │
+│  │  Server  │ │   Events    │ │  HTTP mode (LHM web      │       │
+│  │ (thread) │ │ (SCM ctrl)  │ │    server + nvidia-smi)  │       │
+│  └──────────┘ └─────────────┘ │  or Library mode         │       │
+│                               │    (lhm-helper.exe)      │       │
+│                               └──────────────────────────┘       │
+└──────────────────────────────────────────────────────────────────┘
          ▲ named pipe: \\.\pipe\thelio-io2
          │
 ┌────────┴────────┐
@@ -549,6 +563,8 @@ projects:
   management daemon.  The fan curve data (temperature-to-duty mappings for
   quiet, balanced, and performance profiles) in `fan_curve.rs` was ported from
   this utility's `src/fan.rs`.
+
+- **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)** - Free software that can monitor the temperature sensors, fan speeds, voltages, load and clock speeds of your computer.
 
 ---
 
