@@ -24,10 +24,11 @@
 //                    │
 //         ┌──────────┼──────────┐
 //         │          │          │
-//   ┌─────▼──────┐ ┌▼────────┐ ┌▼──────────────┐
-//   │ IPC Server │ │ Power   │ │ Thermal Reader │
-//   │ (thread)   │ │ Monitor │ │ (LHM HTTP)     │
-//   └────────────┘ └─────────┘ └────────────────┘
+//   ┌─────▼──────┐ ┌▼────────┐ ┌▼──────────────────────────┐
+//   │ IPC Server │ │ Power   │ │ Thermal Source             │
+//   │ (thread)   │ │ Monitor │ │ HTTP (LHM web server) or   │
+//   └────────────┘ └─────────┘ │ Library (lhm-helper.exe)   │
+//                               └────────────────────────────┘
 
 mod device;
 mod eventlog;
@@ -35,10 +36,12 @@ mod fan_curve;
 mod ipc;
 mod power;
 mod thermal;
+mod thermal_lib;
 mod thelio_io;
 
 use std::{
     env,
+    path::PathBuf,
     sync::{
         mpsc::{channel, Receiver, TryRecvError},
         OnceLock,
@@ -65,7 +68,7 @@ use crate::{
     fan_curve::{Profile, TempHysteresis},
     ipc::IpcRequest,
     power::PowerEvent,
-    thermal::{LhmConfig, ThermalReader, ThermalReading},
+    thermal::{LhmConfig, LhmMode, ThermalReading, ThermalSource},
 };
 
 // ── Service name ───────────────────────────────────────────────────────────
@@ -102,6 +105,12 @@ static CONSOLE_STOP_TX: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
 /// LHM connection configuration, parsed once in main() and read by device_loop().
 static LHM_CONFIG: OnceLock<LhmConfig> = OnceLock::new();
 
+/// Which temperature reading backend to use (http or library).
+static LHM_MODE: OnceLock<LhmMode> = OnceLock::new();
+
+/// Path to the lhm-helper.exe sidecar (used in library mode).
+static LHM_HELPER_PATH: OnceLock<PathBuf> = OnceLock::new();
+
 // ── Entry point ───────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -123,10 +132,19 @@ fn main() -> Result<()> {
     *INITIAL_PROFILE.lock() = profile;
     info!("Initial profile: {profile}");
 
-    // Parse LHM connection settings (applies to both console and service mode).
+    // Parse LHM mode and connection settings (applies to both console and service mode).
+    let lhm_mode = parse_lhm_mode(&args);
     let lhm_config = parse_lhm_config(&args);
-    info!("LHM URL: {}", lhm_config.url);
+    let helper_path = parse_lhm_helper_path(&args);
+    info!("LHM mode: {}", if lhm_mode == LhmMode::Http { "http" } else { "library" });
+    if lhm_mode == LhmMode::Http {
+        info!("LHM URL: {}", lhm_config.url);
+    } else {
+        info!("LHM helper: {}", helper_path.display());
+    }
     LHM_CONFIG.set(lhm_config).ok();
+    LHM_MODE.set(lhm_mode).ok();
+    LHM_HELPER_PATH.set(helper_path).ok();
 
     if console_mode {
         info!("Running in console mode (--console)");
@@ -209,6 +227,42 @@ fn parse_lhm_config(args: &[String]) -> LhmConfig {
     }
 
     config
+}
+
+/// Parse --lhm-mode <http|library> from args, defaulting to Http.
+fn parse_lhm_mode(args: &[String]) -> LhmMode {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--lhm-mode" {
+            if let Some(mode) = args.get(i + 1) {
+                match mode.to_lowercase().as_str() {
+                    "http" => return LhmMode::Http,
+                    "library" | "lib" => return LhmMode::Library,
+                    _ => {
+                        eprintln!("Unknown --lhm-mode '{mode}'; using http");
+                    }
+                }
+            }
+        }
+    }
+    LhmMode::Http
+}
+
+/// Parse --lhm-helper-path <path> from args.
+///
+/// Defaults to `lhm-helper.exe` in the same directory as the daemon executable.
+fn parse_lhm_helper_path(args: &[String]) -> PathBuf {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--lhm-helper-path" {
+            if let Some(path) = args.get(i + 1) {
+                return PathBuf::from(path);
+            }
+        }
+    }
+    // Default: same directory as the current executable.
+    env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("lhm-helper.exe")))
+        .unwrap_or_else(|| PathBuf::from("lhm-helper.exe"))
 }
 
 // ── Console (debug) mode ───────────────────────────────────────────────────
@@ -360,7 +414,9 @@ fn device_loop(
     // ── Thermal / fan control state ──────────────────────────────────────
     let mut current_profile = initial_profile;
     let lhm_config = LHM_CONFIG.get().expect("LHM_CONFIG not initialized");
-    let mut thermal_reader = thermal::try_init(lhm_config);
+    let lhm_mode = *LHM_MODE.get().expect("LHM_MODE not initialized");
+    let helper_path = LHM_HELPER_PATH.get().expect("LHM_HELPER_PATH not initialized");
+    let mut thermal_reader = thermal::try_init_source(lhm_mode, lhm_config, helper_path);
     let mut hysteresis = TempHysteresis::new(2.0);
     let mut last_temp_poll = Instant::now() - THERMAL_POLL_INTERVAL;
     let mut last_reading: Option<ThermalReading> = None;
@@ -478,8 +534,8 @@ fn device_loop(
             && last_lhm_retry.elapsed() >= LHM_RETRY_INTERVAL
         {
             last_lhm_retry = Instant::now();
-            debug!("Retrying LHM connection at {}...", lhm_config.url);
-            match thermal::try_init(lhm_config) {
+            debug!("Retrying LHM connection...");
+            match thermal::try_init_source(lhm_mode, lhm_config, helper_path) {
                 Some(reader) => {
                     info!(
                         "LHM connection established — resuming automatic fan control"
@@ -510,7 +566,7 @@ fn device_loop(
             last_temp_poll = Instant::now();
 
             if let Some(curve) = current_profile.curve() {
-                if let Some(ref reader) = thermal_reader {
+                if let Some(ref mut reader) = thermal_reader {
                     match reader.read_temps() {
                         Ok(reading) => {
                             consecutive_http_failures = 0;
@@ -658,7 +714,7 @@ fn handle_request(
     current_profile: &mut Profile,
     desired_profile: &mut Profile,
     last_reading: &Option<ThermalReading>,
-    thermal_reader: &Option<ThermalReader>,
+    thermal_reader: &Option<ThermalSource>,
     daily_max: DailyMaxTemps,
 ) -> IpcResponse {
     match cmd {
