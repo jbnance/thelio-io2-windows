@@ -564,6 +564,8 @@ projects:
   quiet, balanced, and performance profiles) in `fan_curve.rs` was ported from
   this utility's `src/fan.rs`.
 
+- **[thelio-io-windows](https://github.com/system76/thelio-io-windows)** - System76's version of this project for Thelio Io 1 (the predecessor to the device this project focuses on, which uses serial communications instead of HID).
+
 - **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)** - Free software that can monitor the temperature sensors, fan speeds, voltages, load and clock speeds of your computer.
 
 ---
