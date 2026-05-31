@@ -68,7 +68,7 @@ jobs:
           echo "ASSET=$staging.zip" >> $env:GITHUB_ENV
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.ASSET }}
           generate_release_notes: true
