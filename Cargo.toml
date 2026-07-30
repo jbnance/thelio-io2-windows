@@ -35,7 +35,7 @@ simple_logger = { version = "5", features = ["timestamps"] }
 
 # HTTP client for LibreHardwareMonitor web API
 ureq = "3"
-base64 = "0.22"
+base64 = "0.23"
 
 # Synchronization
 parking_lot = "0.12"
