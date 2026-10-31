@@ -38,7 +38,7 @@ ureq = "3"
 base64 = "0.23"
 
 # Synchronization
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # Windows API bindings (power events, named pipes, etc.)
 # This sub-table must come last so the keys above are not absorbed into it.
